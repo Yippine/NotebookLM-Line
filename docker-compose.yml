@@ -7,6 +7,7 @@ services:
       - ./backend/.env
     volumes:
       - ./data:/app/data
+      - ./backend/.env:/app/.env:ro
     expose:
       - "8000"
 
