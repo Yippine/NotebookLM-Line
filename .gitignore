@@ -1,0 +1,13 @@
+backend/.env
+backend/data.db
+backend/test_data.db
+backend/test/
+data/
+*.pyc
+__pycache__/
+venv/
+node_modules/
+frontend/dist/
+.pytest_cache/
+login-tool/
+.kiro/

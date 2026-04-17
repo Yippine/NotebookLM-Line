@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+aiosqlite
+pydantic-settings
+python-dotenv
+cryptography
+httpx
+notebooklm-py

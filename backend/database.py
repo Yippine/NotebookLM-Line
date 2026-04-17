@@ -1,0 +1,34 @@
+import os
+import aiosqlite
+from config import settings
+
+DB = settings.db_path
+
+
+async def init_db():
+    os.makedirs(os.path.dirname(DB) or ".", exist_ok=True)
+    async with aiosqlite.connect(DB) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS channels (
+                channel_id TEXT PRIMARY KEY,
+                channel_secret TEXT NOT NULL,
+                channel_access_token TEXT NOT NULL,
+                nlm_auth_json_encrypted TEXT,
+                notebook_id TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS invite_codes (
+                code TEXT PRIMARY KEY,
+                used INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.commit()
+
+
+async def get_db():
+    async with aiosqlite.connect(DB) as db:
+        db.row_factory = aiosqlite.Row
+        yield db
