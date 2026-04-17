@@ -1,10 +1,20 @@
 services:
   backend:
-    build: .
-    ports:
-      - "8000:8000"
+    build: ./backend
+    container_name: nlm-line-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
     volumes:
       - ./data:/app/data
-    env_file:
-      - backend/.env
+    expose:
+      - "8000"
+
+  frontend:
+    build: ./frontend
+    container_name: nlm-line-frontend
     restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8083}:80"
+    depends_on:
+      - backend
