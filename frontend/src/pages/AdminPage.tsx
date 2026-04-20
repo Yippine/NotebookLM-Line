@@ -127,6 +127,7 @@ export default function AdminPage() {
   };
 
   useEffect(() => {
+    document.title = "講師設定｜Instructor Setting";
     const pw = sessionStorage.getItem("admin_pw");
     if (pw) {
       setPassword(pw);
