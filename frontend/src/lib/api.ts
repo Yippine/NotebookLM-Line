@@ -102,10 +102,12 @@ export async function adminLogin(password: string): Promise<void> {
 export async function getStudents(password: string): Promise<
   Array<{
     code: string;
+    student_name: string;
     used: boolean;
     channel_id: string | null;
     nlm_bound: boolean;
     notebook_id: string | null;
+    expires_at: string | null;
     created_at: string;
   }>
 > {
