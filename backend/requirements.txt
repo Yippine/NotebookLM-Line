@@ -3,6 +3,7 @@ uvicorn
 aiosqlite
 pydantic-settings
 python-dotenv
+python-multipart
 cryptography
 httpx
 notebooklm-py

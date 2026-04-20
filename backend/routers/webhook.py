@@ -28,13 +28,19 @@ async def webhook(channel_id: str, request: Request):
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT channel_secret, channel_access_token FROM channels WHERE channel_id=?",
+            "SELECT channel_secret, channel_access_token, expires_at FROM channels WHERE channel_id=?",
             (channel_id,),
         )
         channel = await cur.fetchone()
 
     if not channel:
         raise HTTPException(404, "Channel not found")
+
+    # Check expiry
+    if channel["expires_at"]:
+        from datetime import datetime, timezone
+        if channel["expires_at"] < datetime.now(timezone.utc).isoformat():
+            return {"status": "expired"}
 
     # Verify LINE signature
     signature = request.headers.get("x-line-signature", "")

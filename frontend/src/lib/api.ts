@@ -126,3 +126,33 @@ export async function deleteChannel(password: string, channelId: string): Promis
   });
   return handleResponse(res);
 }
+
+export async function importCsv(password: string, file: File): Promise<{ imported: number; students: Array<{ name: string; code: string }> }> {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${BASE}/admin/import-csv?admin_password=${encodeURIComponent(password)}`, {
+    method: "POST",
+    body: form,
+  });
+  return handleResponse(res);
+}
+
+export async function setExpiry(password: string, expiresAt: string): Promise<void> {
+  const res = await fetch(`${BASE}/admin/set-expiry?admin_password=${encodeURIComponent(password)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expires_at: expiresAt }),
+  });
+  return handleResponse(res);
+}
+
+export async function clearAllBindings(password: string): Promise<void> {
+  const res = await fetch(`${BASE}/admin/clear-all?admin_password=${encodeURIComponent(password)}`, {
+    method: "DELETE",
+  });
+  return handleResponse(res);
+}
+
+export function exportCsvUrl(password: string): string {
+  return `${BASE}/admin/export-csv?admin_password=${encodeURIComponent(password)}`;
+}
