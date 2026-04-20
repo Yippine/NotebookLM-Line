@@ -16,11 +16,14 @@ def _chunk_messages(text: str) -> list[dict]:
 async def show_loading(user_id: str, access_token: str, seconds: int = 20):
     """Show LINE official loading animation (typing indicator)."""
     async with httpx.AsyncClient() as client:
-        await client.post(
-            f"{LINE_API}/chat/loading",
+        resp = await client.post(
+            "https://api.line.me/v2/bot/chat/loading",
             headers=_headers(access_token),
             json={"chatId": user_id, "loadingSeconds": min(seconds, 60)},
         )
+        if resp.status_code != 200:
+            import logging
+            logging.getLogger(__name__).warning(f"Loading animation failed: {resp.status_code} {resp.text}")
 
 
 async def reply_text(reply_token: str, access_token: str, text: str):
