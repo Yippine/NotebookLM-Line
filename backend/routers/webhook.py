@@ -7,7 +7,7 @@ from fastapi import APIRouter, Request, HTTPException
 import aiosqlite
 from database import DB
 from services.nlm_service import ask_question
-from services.line_service import reply_text, push_text
+from services.line_service import show_loading, push_text
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -57,8 +57,8 @@ async def webhook(channel_id: str, request: Request):
 
         logger.info(f"[{channel_id}] Q: {question[:50]}")
 
-        # Reply immediately with "thinking" then push actual answer
-        await reply_text(reply_token, access_token, "⏳ 查詢中，請稍候...")
+        # Show typing animation instead of text reply
+        await show_loading(user_id, access_token, seconds=30)
 
         # Background task: ask NLM and push result
         asyncio.create_task(
@@ -70,8 +70,9 @@ async def webhook(channel_id: str, request: Request):
 
 async def _ask_and_push(channel_id: str, user_id: str, access_token: str, question: str):
     try:
-        answer = await ask_question(channel_id, question)
-        await push_text(user_id, access_token, answer)
+        messages = await ask_question(channel_id, question)
+        for msg in messages:
+            await push_text(user_id, access_token, msg)
     except Exception as e:
         logger.error(f"[{channel_id}] Error: {e}")
         await push_text(user_id, access_token, "⚠️ 系統發生錯誤，請稍後再試。")

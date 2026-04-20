@@ -15,7 +15,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return JSON.parse(text);
 }
 
-export async function verifyInvite(code: string): Promise<{ token: string }> {
+export async function verifyInvite(code: string): Promise<{ token: string; channel_id?: string }> {
   const res = await fetch(`${BASE}/verify-invite`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -61,5 +61,68 @@ export async function getNlmStatus(
   channelId: string
 ): Promise<{ bound: boolean; notebook_id: string | null; login_status?: string }> {
   const res = await fetch(`${BASE}/channels/${channelId}/nlm-status`);
+  return handleResponse(res);
+}
+
+export async function getChannel(
+  token: string,
+  channelId: string
+): Promise<{ channel_id: string; notebook_id: string | null; nlm_bound: boolean; webhook_url: string }> {
+  const res = await fetch(`${BASE}/channels/${channelId}?token=${token}`);
+  return handleResponse(res);
+}
+
+export async function getNotebooks(
+  channelId: string
+): Promise<{ notebooks: Array<{ id: string; title: string }> }> {
+  const res = await fetch(`${BASE}/channels/${channelId}/notebooks`);
+  return handleResponse(res);
+}
+
+export async function selectNotebook(
+  channelId: string,
+  notebookId: string
+): Promise<{ status: string; notebook_id: string }> {
+  const res = await fetch(`${BASE}/channels/${channelId}/notebook`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ notebook_id: notebookId }),
+  });
+  return handleResponse(res);
+}
+
+// --- Admin APIs ---
+
+export async function adminLogin(password: string): Promise<void> {
+  // Just verify password works by calling students list
+  const res = await fetch(`${BASE}/admin/students?admin_password=${encodeURIComponent(password)}`);
+  if (!res.ok) throw new Error("密碼錯誤");
+}
+
+export async function getStudents(password: string): Promise<
+  Array<{
+    code: string;
+    used: boolean;
+    channel_id: string | null;
+    nlm_bound: boolean;
+    notebook_id: string | null;
+    created_at: string;
+  }>
+> {
+  const res = await fetch(`${BASE}/admin/students?admin_password=${encodeURIComponent(password)}`);
+  return handleResponse(res);
+}
+
+export async function generateInviteCodes(password: string, count: number): Promise<{ codes: string[] }> {
+  const res = await fetch(`${BASE}/invite-codes/generate?count=${count}&admin_password=${encodeURIComponent(password)}`, {
+    method: "POST",
+  });
+  return handleResponse(res);
+}
+
+export async function deleteChannel(password: string, channelId: string): Promise<void> {
+  const res = await fetch(`${BASE}/admin/channels/${channelId}?admin_password=${encodeURIComponent(password)}`, {
+    method: "DELETE",
+  });
   return handleResponse(res);
 }

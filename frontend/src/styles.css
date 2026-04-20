@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: "DM Sans", system-ui, sans-serif;
+  background-color: #F5F0EB;
+  color: #4A4039;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Neo-Tactile inset input */
+@layer components {
+  .input-tactile {
+    @apply w-full px-4 py-3 rounded-tactile bg-surface-inset shadow-inset
+           border border-warm-200 text-warm-800 placeholder-warm-400
+           focus:outline-none focus:border-copper focus:ring-1 focus:ring-copper/30
+           transition-all duration-200;
+  }
+
+  .btn-primary {
+    @apply w-full py-3 px-6 rounded-tactile font-semibold text-white
+           bg-warm-800 shadow-mid
+           hover:bg-warm-700 active:bg-copper active:shadow-soft
+           disabled:bg-warm-300 disabled:text-warm-500 disabled:shadow-none disabled:cursor-not-allowed
+           transition-all duration-200 cursor-pointer;
+  }
+
+  .btn-copper {
+    @apply py-2.5 px-5 rounded-tactile font-semibold text-white
+           bg-copper shadow-mid
+           hover:bg-copper-dark active:shadow-soft
+           disabled:bg-warm-300 disabled:text-warm-500 disabled:shadow-none disabled:cursor-not-allowed
+           transition-all duration-200 cursor-pointer;
+  }
+
+  .btn-ghost {
+    @apply py-2.5 px-5 rounded-tactile font-medium text-warm-600
+           bg-transparent border border-warm-300
+           hover:bg-surface-inset hover:border-warm-400
+           active:bg-surface-pressed
+           transition-all duration-200 cursor-pointer;
+  }
+
+  .card-raised {
+    @apply bg-surface-raised rounded-tactile shadow-mid p-6;
+  }
+
+  .card-base {
+    @apply bg-white/60 rounded-tactile shadow-soft p-5 border border-warm-200/50;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply badge bg-emerald-50 text-emerald-700 border border-emerald-200;
+  }
+
+  .badge-warning {
+    @apply badge bg-amber-50 text-amber-700 border border-amber-200;
+  }
+
+  .badge-danger {
+    @apply badge bg-red-50 text-red-700 border border-red-200;
+  }
+}

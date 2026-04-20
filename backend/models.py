@@ -20,3 +20,7 @@ class ChannelOut(BaseModel):
 
 class NlmLoginRequest(BaseModel):
     storage_state_json: dict
+
+
+class NotebookSelect(BaseModel):
+    notebook_id: str

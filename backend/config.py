@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     encryption_key: str = ""
     webhook_base_url: str = "https://your-domain.com"
     db_path: str = "data.db"
+    admin_password: str = "changeme"
 
     class Config:
         env_file = ".env"

@@ -4,8 +4,8 @@ import json
 import glob
 import os
 from database import DB
-from models import NlmLoginRequest
-from services.nlm_service import bind_nlm
+from models import NlmLoginRequest, NotebookSelect
+from services.nlm_service import bind_nlm, list_notebooks_for_channel, select_notebook
 
 router = APIRouter(tags=["auth"])
 
@@ -35,14 +35,15 @@ async def nlm_login(channel_id: str, body: NlmLoginRequest):
             raise HTTPException(404, "Channel 不存在，請先建立 Channel")
 
     try:
-        notebook_id = await bind_nlm(channel_id, body.storage_state_json)
+        notebook_id, notebooks = await bind_nlm(channel_id, body.storage_state_json)
     except Exception as e:
         raise HTTPException(400, f"NotebookLM 綁定失敗：{e}")
 
     return {
         "status": "bound",
         "notebook_id": notebook_id,
-        "message": "NotebookLM 綁定成功" + (f"，已選取 Notebook: {notebook_id}" if notebook_id else "，但未找到任何 Notebook"),
+        "notebooks": notebooks,
+        "message": "NotebookLM 綁定成功",
     }
 
 
@@ -68,15 +69,16 @@ async def nlm_bind_local(channel_id: str):
         raise HTTPException(400, f"讀取 storage_state.json 失敗：{e}")
 
     try:
-        notebook_id = await bind_nlm(channel_id, storage_state)
+        notebook_id, notebooks = await bind_nlm(channel_id, storage_state)
     except Exception as e:
         raise HTTPException(400, f"NotebookLM 綁定失敗：{e}")
 
     return {
         "status": "bound",
         "notebook_id": notebook_id,
+        "notebooks": notebooks,
         "storage_path": path,
-        "message": "NotebookLM 綁定成功" + (f"，已選取 Notebook: {notebook_id}" if notebook_id else "，但未找到任何 Notebook"),
+        "message": "NotebookLM 綁定成功",
     }
 
 
@@ -95,3 +97,24 @@ async def nlm_status(channel_id: str):
         "bound": row["nlm_auth_json_encrypted"] is not None,
         "notebook_id": row["notebook_id"],
     }
+
+
+@router.get("/channels/{channel_id}/notebooks")
+async def get_notebooks(channel_id: str):
+    """List all notebooks for this channel's bound NLM account."""
+    try:
+        notebooks = await list_notebooks_for_channel(channel_id)
+    except Exception as e:
+        raise HTTPException(400, f"取得筆記本清單失敗：{e}")
+    return {"notebooks": notebooks}
+
+
+@router.put("/channels/{channel_id}/notebook")
+async def set_notebook(channel_id: str, body: NotebookSelect):
+    """Select which notebook to use for this channel."""
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute("SELECT channel_id FROM channels WHERE channel_id=?", (channel_id,))
+        if not await cur.fetchone():
+            raise HTTPException(404, "Channel 不存在")
+    await select_notebook(channel_id, body.notebook_id)
+    return {"status": "ok", "notebook_id": body.notebook_id}

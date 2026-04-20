@@ -7,9 +7,8 @@ services:
       - ./backend/.env
     volumes:
       - ./data:/app/data
-      - ./backend/.env:/app/.env:ro
-    expose:
-      - "8000"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
 
   frontend:
     build: ./frontend

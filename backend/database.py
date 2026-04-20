@@ -22,6 +22,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS invite_codes (
                 code TEXT PRIMARY KEY,
                 used INTEGER DEFAULT 0,
+                channel_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
