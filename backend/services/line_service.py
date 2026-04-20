@@ -13,8 +13,8 @@ def _chunk_messages(text: str) -> list[dict]:
     return [{"type": "text", "text": c} for c in chunks[:5]]
 
 
-async def show_loading(user_id: str, access_token: str, seconds: int = 20):
-    """Show LINE official loading animation (typing indicator)."""
+async def show_loading(user_id: str, access_token: str, seconds: int = 20) -> bool:
+    """Show LINE loading animation. Returns True if successful."""
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             "https://api.line.me/v2/bot/chat/loading",
@@ -24,6 +24,8 @@ async def show_loading(user_id: str, access_token: str, seconds: int = 20):
         if resp.status_code != 200:
             import logging
             logging.getLogger(__name__).warning(f"Loading animation failed: {resp.status_code} {resp.text}")
+            return False
+        return True
 
 
 async def reply_text(reply_token: str, access_token: str, text: str):

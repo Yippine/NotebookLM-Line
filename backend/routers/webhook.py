@@ -7,7 +7,7 @@ from fastapi import APIRouter, Request, HTTPException
 import aiosqlite
 from database import DB
 from services.nlm_service import ask_question
-from services.line_service import show_loading, push_text
+from services.line_service import show_loading, reply_text, push_text
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -63,8 +63,9 @@ async def webhook(channel_id: str, request: Request):
 
         logger.info(f"[{channel_id}] Q: {question[:50]}")
 
-        # Show typing animation instead of text reply
-        await show_loading(user_id, access_token, seconds=30)
+        # Try loading animation first, fallback to text message
+        if not await show_loading(user_id, access_token, seconds=30):
+            await reply_text(reply_token, access_token, "⏳正在查詢中，請稍後")
 
         # Background task: ask NLM and push result
         asyncio.create_task(
