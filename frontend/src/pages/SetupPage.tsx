@@ -139,9 +139,9 @@ export default function SetupPage() {
     <div className="min-h-screen flex items-center justify-center p-6">
       <div className="card-raised w-full max-w-lg">
         <h1 className="font-display text-2xl font-bold text-warm-800 text-center mb-2">
-          Channel 設定
+          AI NoteBook 設定
         </h1>
-        <p className="text-warm-500 text-sm text-center mb-6">設定你的 LINE 官方帳號與 NotebookLM</p>
+        <p className="text-warm-500 text-sm text-center mb-6">將 LINE 官方帳號與 NotebookLM 連線，開啟 AI 問答</p>
 
         <StepIndicator current={step} />
 
