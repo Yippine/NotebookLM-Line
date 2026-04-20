@@ -34,6 +34,7 @@ async def init_db():
         for table, col, col_def in [
             ("channels", "expires_at", "DATETIME"),
             ("invite_codes", "student_name", "TEXT DEFAULT ''"),
+            ("invite_codes", "channel_id", "TEXT"),
         ]:
             cur = await db.execute(f"PRAGMA table_info({table})")
             cols = [r[1] for r in await cur.fetchall()]
