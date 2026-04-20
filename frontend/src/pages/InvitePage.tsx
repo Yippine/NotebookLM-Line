@@ -37,9 +37,9 @@ export default function InvitePage() {
         </div>
 
         <h1 className="font-display text-2xl font-bold text-warm-800 mb-1">
-          NotebookLM
+          AI-Notebook
         </h1>
-        <p className="text-warm-500 text-sm mb-8">LINE Bot 管理平台</p>
+        <p className="text-warm-500 text-sm mb-8">讓你的 LINE 擁有 AI 知識大腦</p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="text-left">
