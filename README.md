@@ -79,3 +79,7 @@ cloudflared tunnel --url http://localhost:8000
 | GET | `/api/channels/{id}/nlm-status` | 查詢綁定狀態 |
 | POST | `/api/invite-codes/generate` | 批量產生邀請碼 |
 | POST | `/webhook/{channel_id}` | LINE Webhook |
+
+## 貢獻與反饋
+
+程式架構若有需要改進的地方，歡迎反饋或公開討論，拒絕任何私底下或公開貶低、嘲諷原創作者開發瑕疵的行為。
