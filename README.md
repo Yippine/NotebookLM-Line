@@ -80,6 +80,12 @@ cloudflared tunnel --url http://localhost:8000
 | POST | `/api/invite-codes/generate` | 批量產生邀請碼 |
 | POST | `/webhook/{channel_id}` | LINE Webhook |
 
-## 貢獻與反饋
+## 貢獻與溝通準則
 
-程式架構若有需要改進的地方，歡迎反饋或公開討論，拒絕任何私底下或公開貶低、嘲諷原創作者開發瑕疵的行為。
+本專案歡迎任何形式的技術交流與改進建議。若您發現程式架構有需要改進之處，歡迎透過 [Issue](https://github.com/YwY170/notebooklm-line/issues) 或 [Pull Request](https://github.com/YwY170/notebooklm-line/pulls) 提出公開、具體、建設性的反饋。
+
+> ⚠️ **本專案明確拒絕任何以私下或公開方式貶低、嘲諷原創作者開發瑕疵的行為。**  
+> 每一段程式碼都是作者投入心力的成果，技術本就是在迭代中進步的。請以尊重與善意的方式進行交流，共同維護良好的開源協作環境。
+
+> 🏳️‍🌈 **本專案支持性別友善，明確拒絕任何形式的性別攻擊與歧視。**  
+> 無論性別認同或性別表達為何，每位貢獻者與使用者都應受到平等尊重。
