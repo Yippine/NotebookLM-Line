@@ -5,7 +5,13 @@ import glob
 import os
 from database import DB
 from models import NlmLoginRequest, NotebookSelect
-from services.nlm_service import bind_nlm, list_notebooks_for_channel, select_notebook
+from services.crypto_service import decrypt
+from services.nlm_service import (
+    bind_nlm,
+    configure_restricted_topic_guard,
+    list_notebooks_for_channel,
+    select_notebook,
+)
 
 router = APIRouter(tags=["auth"])
 
@@ -97,6 +103,30 @@ async def nlm_status(channel_id: str):
         "bound": row["nlm_auth_json_encrypted"] is not None,
         "notebook_id": row["notebook_id"],
     }
+
+
+@router.post("/channels/{channel_id}/refresh-guard")
+async def refresh_guard(channel_id: str):
+    """Re-push the current restricted-topic persona instruction to an
+    already-bound channel's notebook (e.g. after tuning the prompt text)."""
+    async with aiosqlite.connect(DB) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT nlm_auth_json_encrypted, notebook_id FROM channels WHERE channel_id=?",
+            (channel_id,),
+        )
+        row = await cur.fetchone()
+
+    if not row or not row["nlm_auth_json_encrypted"] or not row["notebook_id"]:
+        raise HTTPException(400, "此 Channel 尚未綁定 NotebookLM")
+
+    storage_state = decrypt(row["nlm_auth_json_encrypted"])
+    try:
+        await configure_restricted_topic_guard(storage_state, row["notebook_id"])
+    except Exception as e:
+        raise HTTPException(400, f"套用限制主題設定失敗：{e}")
+
+    return {"status": "ok", "channel_id": channel_id}
 
 
 @router.get("/channels/{channel_id}/notebooks")

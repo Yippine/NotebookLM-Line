@@ -1,6 +1,7 @@
 import httpx
 
 LINE_API = "https://api.line.me/v2/bot"
+LINE_CONTENT_API = "https://api-data.line.me/v2/bot/message"
 
 
 def _headers(access_token: str) -> dict:
@@ -46,3 +47,15 @@ async def push_text(user_id: str, access_token: str, text: str):
             headers=_headers(access_token),
             json={"to": user_id, "messages": _chunk_messages(text)},
         )
+
+
+async def download_content(message_id: str, access_token: str) -> bytes:
+    """Download LINE message content bytes for file or image attachments."""
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{LINE_CONTENT_API}/{message_id}/content",
+            headers=_headers(access_token),
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"下載 LINE 附件失敗：{resp.status_code} {resp.text}")
+        return resp.content
