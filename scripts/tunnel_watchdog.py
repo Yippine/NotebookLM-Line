@@ -86,13 +86,27 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
     return proc, hostname
 
 
+# Cloudflare edge error codes meaning "reached Cloudflare fine, but it
+# can't reach the local tunnel/origin" — a dead tunnel, not a dead app.
+# https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/
+_TUNNEL_DEAD_HTTP_CODES = {502, 521, 522, 523, 524, 530}
+
+
 def is_dns_alive(hostname: str) -> bool:
-    """True unless the hostname's DNS registration has been dropped."""
+    """True only if the tunnel is actually forwarding to the local app.
+
+    A plain HTTP error from *our own app* (e.g. 403 from a bad signature)
+    means the tunnel is fine. A Cloudflare edge error (e.g. 530) means the
+    tunnel registration exists but isn't actually connected to anything —
+    that's a dead tunnel wearing a live hostname.
+    """
     try:
         urllib.request.urlopen(f"https://{hostname}/", timeout=10)
         return True
-    except urllib.error.HTTPError:
-        # Any HTTP response (even an error status) means DNS + TLS worked.
+    except urllib.error.HTTPError as e:
+        if e.code in _TUNNEL_DEAD_HTTP_CODES:
+            log(f"{hostname} responded but tunnel is unreachable (HTTP {e.code})")
+            return False
         return True
     except Exception as e:
         log(f"health check failed for {hostname}: {e}")
