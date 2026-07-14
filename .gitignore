@@ -1,4 +1,7 @@
 backend/.env
+backend/google-service-account.json
+backend/google-oauth-client.json
+backend/google-oauth-token.json
 backend/data.db
 backend/test_data.db
 backend/test/

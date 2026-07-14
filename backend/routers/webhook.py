@@ -4,12 +4,20 @@ import base64
 import asyncio
 import logging
 import re
+from datetime import datetime
 from fastapi import APIRouter, Request, HTTPException
 import aiosqlite
 from config import settings
 from database import DB
+from services import google_log_service
 from services.nlm_service import ask_question, update_knowledge_base
-from services.line_service import show_loading, reply_text, push_text, download_content
+from services.line_service import (
+    show_loading,
+    reply_text,
+    push_text,
+    download_content,
+    get_display_name,
+)
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -203,6 +211,14 @@ async def webhook(channel_id: str, request: Request):
             logger.info(f"[{channel_id}] Skipped: no usable target id in source={source}")
             continue
 
+        # The actual sender, distinct from target_id in group/room chats —
+        # used to keep each person's own NotebookLM conversation thread
+        # separate. LINE omits this for group members who haven't friended
+        # the OA; those questions are still answered, just without memory.
+        sender_user_id = source.get("userId")
+        group_id = source.get("groupId")
+        room_id = source.get("roomId")
+
         if message_type == "text":
             question = message["text"]
             if source_type in ("group", "room"):
@@ -220,9 +236,18 @@ async def webhook(channel_id: str, request: Request):
             restricted_topic = classify_restricted_topic(question)
             if restricted_topic == "authorization_promise":
                 await reply_text(reply_token, access_token, _RESTRICTED_TOPIC_REPLY)
+                asyncio.create_task(_record_interaction(
+                    channel_id, group_id, room_id, sender_user_id, access_token,
+                    question, _RESTRICTED_TOPIC_REPLY, "需人工聯絡",
+                ))
                 continue
             if restricted_topic == "purchase":
-                await reply_text(reply_token, access_token, _purchase_intent_reply())
+                reply = _purchase_intent_reply()
+                await reply_text(reply_token, access_token, reply)
+                asyncio.create_task(_record_interaction(
+                    channel_id, group_id, room_id, sender_user_id, access_token,
+                    question, reply, "需人工聯絡",
+                ))
                 continue
 
             if source_type == "user":
@@ -233,7 +258,10 @@ async def webhook(channel_id: str, request: Request):
                 await reply_text(reply_token, access_token, "⏳正在查詢中，請稍後")
 
             asyncio.create_task(
-                _ask_and_push(channel_id, target_id, access_token, question)
+                _ask_and_push(
+                    channel_id, target_id, access_token, question,
+                    sender_user_id, group_id, room_id,
+                )
             )
             continue
 
@@ -261,14 +289,63 @@ async def webhook(channel_id: str, request: Request):
     return {"status": "ok"}
 
 
-async def _ask_and_push(channel_id: str, target_id: str, access_token: str, question: str):
+async def _ask_and_push(
+    channel_id: str,
+    target_id: str,
+    access_token: str,
+    question: str,
+    sender_user_id: str | None = None,
+    group_id: str | None = None,
+    room_id: str | None = None,
+):
+    status = "已完成"
+    answer_text = ""
     try:
-        messages = await ask_question(channel_id, question)
+        messages = await ask_question(channel_id, question, sender_user_id)
+        answer_text = "\n".join(messages)
+        if any(msg.startswith("⚠️") for msg in messages):
+            status = "異常"
         for msg in messages:
             await push_text(target_id, access_token, msg)
     except Exception as e:
         logger.error(f"[{channel_id}] Error: {e}")
+        status = "異常"
+        answer_text = f"系統發生錯誤：{e}"
         await push_text(target_id, access_token, "⚠️ 系統發生錯誤，請稍後再試。")
+
+    asyncio.create_task(_record_interaction(
+        channel_id, group_id, room_id, sender_user_id, access_token,
+        question, answer_text, status,
+    ))
+
+
+async def _record_interaction(
+    channel_id: str,
+    group_id: str | None,
+    room_id: str | None,
+    sender_user_id: str | None,
+    access_token: str,
+    question: str,
+    answer: str,
+    status: str,
+):
+    """Log a Q&A as a text record in the user's Drive folder plus a row in
+    the tracking Sheet, ~2s after the reply is sent. Best-effort: failures
+    here never affect the LINE conversation, only get logged server-side."""
+    if not sender_user_id:
+        return  # can't build a per-user folder without a stable identity
+
+    await asyncio.sleep(2)
+    try:
+        display_name = await get_display_name(access_token, sender_user_id, group_id, room_id)
+        folder_id, folder_link = await google_log_service.get_or_create_user_folder(
+            channel_id, sender_user_id, display_name
+        )
+        now = datetime.now()
+        await google_log_service.save_text_record(folder_id, question, answer, now)
+        await google_log_service.append_sheet_row(now, display_name, folder_link, status)
+    except Exception as e:
+        logger.error(f"[{channel_id}] Failed to record interaction to Google: {e}")
 
 
 async def _upload_and_push(

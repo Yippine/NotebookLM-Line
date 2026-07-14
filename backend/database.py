@@ -28,6 +28,17 @@ async def init_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_conversations (
+                channel_id TEXT NOT NULL,
+                line_user_id TEXT NOT NULL,
+                conversation_id TEXT,
+                drive_folder_id TEXT,
+                drive_folder_link TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (channel_id, line_user_id)
+            )
+        """)
         await db.commit()
 
         # Migrate: add columns if missing (for existing DBs)
@@ -35,6 +46,8 @@ async def init_db():
             ("channels", "expires_at", "DATETIME"),
             ("invite_codes", "student_name", "TEXT DEFAULT ''"),
             ("invite_codes", "channel_id", "TEXT"),
+            ("user_conversations", "drive_folder_id", "TEXT"),
+            ("user_conversations", "drive_folder_link", "TEXT"),
         ]:
             cur = await db.execute(f"PRAGMA table_info({table})")
             cols = [r[1] for r in await cur.fetchall()]

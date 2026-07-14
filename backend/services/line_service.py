@@ -59,3 +59,25 @@ async def download_content(message_id: str, access_token: str) -> bytes:
         if resp.status_code != 200:
             raise RuntimeError(f"下載 LINE 附件失敗：{resp.status_code} {resp.text}")
         return resp.content
+
+
+async def get_display_name(
+    access_token: str,
+    user_id: str,
+    group_id: str | None = None,
+    room_id: str | None = None,
+) -> str:
+    """Look up a user's display name. Falls back to their raw userId if the
+    profile lookup fails (e.g. they haven't friended the OA)."""
+    if group_id:
+        url = f"{LINE_API}/group/{group_id}/member/{user_id}"
+    elif room_id:
+        url = f"{LINE_API}/room/{room_id}/member/{user_id}"
+    else:
+        url = f"{LINE_API}/profile/{user_id}"
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=_headers(access_token))
+        if resp.status_code != 200:
+            return user_id
+        return resp.json().get("displayName", user_id)

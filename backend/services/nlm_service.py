@@ -238,9 +238,40 @@ async def update_knowledge_base(
         return f"⚠️ 更新知識庫失敗：{e}"
 
 
-async def ask_question(channel_id: str, question: str) -> list[str]:
-    """Load cookie for channel, ask NotebookLM, return [answer, sources] messages."""
-    from services.text_formatter import format_for_line, build_sources_message
+async def _get_conversation_id(channel_id: str, line_user_id: str) -> str | None:
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute(
+            "SELECT conversation_id FROM user_conversations WHERE channel_id=? AND line_user_id=?",
+            (channel_id, line_user_id),
+        )
+        row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def _save_conversation_id(channel_id: str, line_user_id: str, conversation_id: str) -> None:
+    async with aiosqlite.connect(DB) as db:
+        await db.execute(
+            """
+            INSERT INTO user_conversations (channel_id, line_user_id, conversation_id, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(channel_id, line_user_id)
+            DO UPDATE SET conversation_id=excluded.conversation_id, updated_at=CURRENT_TIMESTAMP
+            """,
+            (channel_id, line_user_id, conversation_id),
+        )
+        await db.commit()
+
+
+async def ask_question(channel_id: str, question: str, line_user_id: str | None = None) -> list[str]:
+    """Load cookie for channel, ask NotebookLM, return LINE-ready answer message(s).
+
+    When ``line_user_id`` is given, the question continues that user's own
+    NotebookLM conversation thread on this notebook (persisted across
+    requests), so follow-up questions carry prior context. Without it
+    (e.g. an anonymous group member LINE won't give us an id for), each
+    question is asked standalone.
+    """
+    from services.text_formatter import format_for_line, build_answer_messages
 
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
@@ -256,8 +287,12 @@ async def ask_question(channel_id: str, question: str) -> list[str]:
     storage_state = decrypt(row["nlm_auth_json_encrypted"])
     notebook_id = row["notebook_id"]
 
+    conversation_id = (
+        await _get_conversation_id(channel_id, line_user_id) if line_user_id else None
+    )
+
     async def _ask(client):
-        result = await client.chat.ask(notebook_id, question)
+        result = await client.chat.ask(notebook_id, question, conversation_id=conversation_id)
         # Build source_id → title map
         source_map = {}
         if result.references:
@@ -266,14 +301,12 @@ async def ask_question(channel_id: str, question: str) -> list[str]:
             for ref in result.references:
                 if ref.citation_number is not None and ref.source_id in id_to_title:
                     source_map[ref.citation_number] = id_to_title[ref.source_id]
-        return result.answer, source_map
+        return result.answer, result.conversation_id, source_map
 
     try:
-        answer, source_map = await _run_with_auth(storage_state, _ask)
-        messages = [format_for_line(answer)]
-        sources_msg = build_sources_message(answer, source_map)
-        if sources_msg:
-            messages.append(sources_msg)
-        return messages
+        answer, new_conversation_id, source_map = await _run_with_auth(storage_state, _ask)
+        if line_user_id and new_conversation_id:
+            await _save_conversation_id(channel_id, line_user_id, new_conversation_id)
+        return build_answer_messages(format_for_line(answer), source_map)
     except Exception as e:
         return [f"⚠️ 查詢失敗：{e}"]

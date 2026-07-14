@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     db_path: str = "data.db"
     admin_password: str = "changeme"
     dealer_contact_info: str = "如需購車相關服務，請聯繫業務窗口。"
+    google_oauth_token_path: str = "google-oauth-token.json"
+    google_sheet_id: str = ""
+    google_drive_parent_folder_id: str = ""
 
     class Config:
         env_file = ".env"
