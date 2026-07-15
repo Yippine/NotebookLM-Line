@@ -45,12 +45,29 @@ async def expiry_scheduler():
         await asyncio.sleep(60)
 
 
+async def conversation_retention_scheduler():
+    """Background task: purge conversation records (tracking-sheet rows and
+    Drive Q&A files) older than the retention window, once a day."""
+    from services import google_log_service
+
+    while True:
+        try:
+            result = await google_log_service.cleanup_old_conversation_records()
+            if result["deleted_rows"] or result["deleted_files"]:
+                logger.info(f"Conversation retention cleanup: {result}")
+        except Exception as e:
+            logger.error(f"Conversation retention cleanup error: {e}")
+        await asyncio.sleep(24 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    task = asyncio.create_task(expiry_scheduler())
+    expiry_task = asyncio.create_task(expiry_scheduler())
+    retention_task = asyncio.create_task(conversation_retention_scheduler())
     yield
-    task.cancel()
+    expiry_task.cancel()
+    retention_task.cancel()
 
 
 app = FastAPI(title="NotebookLM LINE Bot Platform", lifespan=lifespan)

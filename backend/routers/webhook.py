@@ -4,7 +4,7 @@ import base64
 import asyncio
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, HTTPException
 import aiosqlite
 from config import settings
@@ -14,13 +14,14 @@ from services.nlm_service import ask_question, update_knowledge_base
 from services.line_service import (
     show_loading,
     reply_text,
-    push_text,
     download_content,
     get_display_name,
 )
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
+
+_BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 def verify_signature(body: bytes, signature: str, channel_secret: str) -> bool:
@@ -76,14 +77,26 @@ _AUTHORIZATION_PROMISE_KEYWORDS = (
     # commercial-use / authorization phrasing without the word "授權"
     "商業廣告", "協力廠商", "推薦指定",
 )
-_RESTRICTED_TOPIC_REPLY = "本機器人僅供諮詢用途，不可以回答有關交易、買賣、授權、承諾等事宜。"
+_RESTRICTED_TOPIC_REPLY = (
+    "不好意思，像是授權、承諾或保證等問題，這邊沒辦法直接答覆您，"
+    "還是要麻煩您與業務人員確認，才能給您最準確的說明 🙏"
+)
+_PURCHASE_INTENT_PREFIX = (
+    "不好意思，購車、報價這類交易細節得由業務人員親自為您服務，"
+    "沒辦法透過機器人直接回覆喔！"
+)
+_PURCHASE_INTENT_CONTACT_LEAD_IN = "您可以直接聯繫以下廠商，由專人為您服務："
+
+_CONTACT_INFO_QUERY_TEMPLATE = (
+    "使用者詢問以下車輛相關內容，請根據知識庫找出符合描述的廠商，"
+    "只回覆該廠商的 con_info 聯絡資訊；不要提供價格、報價或任何交易相關內容：\n"
+    "{question}"
+)
 
 
 def _purchase_intent_reply() -> str:
-    return (
-        "本機器人僅供諮詢用途，不可以回答交易、報價等購車相關事宜。\n"
-        f"{settings.dealer_contact_info}"
-    )
+    """Generic fallback contact reply, used when no specific vendor can be matched."""
+    return f"{_PURCHASE_INTENT_PREFIX}\n{settings.dealer_contact_info}"
 
 # Phrases that look restricted by keyword alone but are actually plain info
 # questions (e.g. "does this authorized service center exist"), not requests
@@ -242,26 +255,21 @@ async def webhook(channel_id: str, request: Request):
                 ))
                 continue
             if restricted_topic == "purchase":
-                reply = _purchase_intent_reply()
-                await reply_text(reply_token, access_token, reply)
-                asyncio.create_task(_record_interaction(
-                    channel_id, group_id, room_id, sender_user_id, access_token,
-                    question, reply, "需人工聯絡",
-                ))
+                if source_type == "user":
+                    await show_loading(target_id, access_token, seconds=30)
+
+                await _purchase_intent_ask_and_reply(
+                    channel_id, reply_token, access_token, question,
+                    sender_user_id, group_id, room_id,
+                )
                 continue
 
             if source_type == "user":
-                loading_ok = await show_loading(target_id, access_token, seconds=30)
-            else:
-                loading_ok = False
-            if not loading_ok:
-                await reply_text(reply_token, access_token, "⏳正在查詢中，請稍後")
+                await show_loading(target_id, access_token, seconds=30)
 
-            asyncio.create_task(
-                _ask_and_push(
-                    channel_id, target_id, access_token, question,
-                    sender_user_id, group_id, room_id,
-                )
+            await _ask_and_reply(
+                channel_id, reply_token, access_token, question,
+                sender_user_id, group_id, room_id,
             )
             continue
 
@@ -270,52 +278,95 @@ async def webhook(channel_id: str, request: Request):
             file_id = message.get("id")
 
             if source_type == "user":
-                loading_ok = await show_loading(target_id, access_token, seconds=30)
-            else:
-                loading_ok = False
-            if not loading_ok:
-                await reply_text(reply_token, access_token, "⏳正在更新知識庫，請稍後")
+                await show_loading(target_id, access_token, seconds=30)
 
-            asyncio.create_task(
-                _upload_and_push(
-                    channel_id,
-                    target_id,
-                    access_token,
-                    file_id,
-                    file_name,
-                )
+            await _upload_and_reply(
+                channel_id, reply_token, access_token, file_id, file_name,
             )
 
     return {"status": "ok"}
 
 
-async def _ask_and_push(
+async def _ask_and_reply(
     channel_id: str,
-    target_id: str,
+    reply_token: str,
     access_token: str,
     question: str,
     sender_user_id: str | None = None,
     group_id: str | None = None,
     room_id: str | None = None,
 ):
+    """Answer a question and deliver it via the reply token (not push) —
+    reply messages aren't metered against the account's monthly LINE
+    message quota the way push messages are. This blocks the webhook
+    handler for as long as the NotebookLM query takes, so very slow
+    queries risk the reply token expiring; that's the accepted tradeoff
+    for not depending on push."""
     status = "已完成"
     answer_text = ""
     try:
         messages = await ask_question(channel_id, question, sender_user_id)
+        if not messages:
+            messages = ["⚠️ 沒有取得回覆內容，請稍後再試。"]
         answer_text = "\n".join(messages)
         if any(msg.startswith("⚠️") for msg in messages):
             status = "異常"
-        for msg in messages:
-            await push_text(target_id, access_token, msg)
+        await reply_text(reply_token, access_token, messages)
     except Exception as e:
         logger.error(f"[{channel_id}] Error: {e}")
         status = "異常"
         answer_text = f"系統發生錯誤：{e}"
-        await push_text(target_id, access_token, "⚠️ 系統發生錯誤，請稍後再試。")
+        try:
+            await reply_text(reply_token, access_token, "⚠️ 系統發生錯誤，請稍後再試。")
+        except Exception as reply_error:
+            logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
 
     asyncio.create_task(_record_interaction(
         channel_id, group_id, room_id, sender_user_id, access_token,
         question, answer_text, status,
+    ))
+
+
+async def _purchase_intent_ask_and_reply(
+    channel_id: str,
+    reply_token: str,
+    access_token: str,
+    question: str,
+    sender_user_id: str | None,
+    group_id: str | None = None,
+    room_id: str | None = None,
+):
+    """Handle a purchase-intent question: refuse to discuss the transaction
+    itself, but still look up which vendor's car matches and hand back that
+    vendor's contact info (con_info) instead of one hardcoded phone number.
+
+    The lookup query is a standalone NotebookLM question (not tied to the
+    user's own conversation thread), so this meta-instruction doesn't leak
+    into their ongoing chat history. Delivered via reply (not push) for the
+    same quota reason as ``_ask_and_reply``.
+    """
+    reply = _purchase_intent_reply()
+    try:
+        contact_query = _CONTACT_INFO_QUERY_TEMPLATE.format(question=question)
+        messages = await ask_question(channel_id, contact_query, line_user_id=None)
+        vendor_messages = [m for m in messages if m.startswith("【")]
+        if vendor_messages:
+            intro = f"{_PURCHASE_INTENT_PREFIX}\n\n{_PURCHASE_INTENT_CONTACT_LEAD_IN}"
+            reply_messages = [intro] + vendor_messages
+            await reply_text(reply_token, access_token, reply_messages)
+            reply = "\n".join(reply_messages)
+        else:
+            await reply_text(reply_token, access_token, reply)
+    except Exception as e:
+        logger.error(f"[{channel_id}] Error looking up vendor contact info: {e}")
+        try:
+            await reply_text(reply_token, access_token, reply)
+        except Exception as reply_error:
+            logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
+
+    asyncio.create_task(_record_interaction(
+        channel_id, group_id, room_id, sender_user_id, access_token,
+        question, reply, "需人工聯絡",
     ))
 
 
@@ -341,27 +392,32 @@ async def _record_interaction(
         folder_id, folder_link = await google_log_service.get_or_create_user_folder(
             channel_id, sender_user_id, display_name
         )
-        now = datetime.now()
+        now = datetime.now(_BEIJING_TZ)
         await google_log_service.save_text_record(folder_id, question, answer, now)
         await google_log_service.append_sheet_row(now, display_name, folder_link, status)
     except Exception as e:
         logger.error(f"[{channel_id}] Failed to record interaction to Google: {e}")
 
 
-async def _upload_and_push(
+async def _upload_and_reply(
     channel_id: str,
-    target_id: str,
+    reply_token: str,
     access_token: str,
     file_id: str | None,
     file_name: str,
 ):
+    """Update the knowledge base and confirm via reply (not push) — same
+    quota reasoning as ``_ask_and_reply``."""
     try:
         if not file_id:
             raise ValueError("缺少 LINE 附件 ID")
 
         file_bytes = await download_content(file_id, access_token)
         message = await update_knowledge_base(channel_id, file_bytes, file_name)
-        await push_text(target_id, access_token, message)
+        await reply_text(reply_token, access_token, message)
     except Exception as e:
         logger.error(f"[{channel_id}] Upload error: {e}")
-        await push_text(target_id, access_token, f"⚠️ 更新知識庫失敗：{e}")
+        try:
+            await reply_text(reply_token, access_token, f"⚠️ 更新知識庫失敗：{e}")
+        except Exception as reply_error:
+            logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")

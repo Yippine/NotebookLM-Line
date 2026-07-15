@@ -1,6 +1,7 @@
 import asyncio
 import io
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 from google.auth.transport.requests import Request
@@ -18,6 +19,12 @@ _SCOPES = [
 
 _drive = None
 _sheets = None
+
+logger = logging.getLogger(__name__)
+
+RETENTION_MONTHS = 4
+_BEIJING_TZ = timezone(timedelta(hours=8))
+_SHEET_TIME_FORMAT = "%Y/%m/%d %H:%M:%S"
 
 
 def _load_credentials() -> Credentials:
@@ -126,3 +133,142 @@ async def append_sheet_row(
 ) -> None:
     row = [date_time.strftime("%Y-%m-%d %H:%M:%S"), nickname, folder_link, status, note]
     await asyncio.to_thread(_append_sheet_row, row)
+
+
+def _retention_cutoff(months: int) -> datetime:
+    """Naive Beijing-local cutoff ``months`` months before now — naive
+    because that's how timestamps are stored (see ``append_sheet_row``'s
+    strftime, which drops tzinfo), so comparisons stay apples-to-apples."""
+    now = datetime.now(_BEIJING_TZ)
+    total = now.year * 12 + (now.month - 1) - months
+    year, month0 = divmod(total, 12)
+    return now.replace(year=year, month=month0 + 1, day=min(now.day, 28), tzinfo=None)
+
+
+def _get_sheet_id() -> int:
+    _, sheets = _clients()
+    meta = sheets.spreadsheets().get(
+        spreadsheetId=settings.google_sheet_id, fields="sheets.properties"
+    ).execute()
+    return meta["sheets"][0]["properties"]["sheetId"]
+
+
+def _read_sheet_time_column() -> list[str]:
+    _, sheets = _clients()
+    result = sheets.spreadsheets().values().get(
+        spreadsheetId=settings.google_sheet_id,
+        range="A2:A",
+        valueRenderOption="FORMATTED_VALUE",
+    ).execute()
+    return [row[0] if row else "" for row in result.get("values", [])]
+
+
+def _delete_sheet_row_range(sheet_id: int, start_index: int, end_index: int) -> None:
+    """0-indexed, end_index exclusive (Sheets API deleteDimension semantics).
+    Deleting the row dimension (not just clearing cell contents) is what
+    makes the remaining rows shift up automatically."""
+    _, sheets = _clients()
+    body = {
+        "requests": [{
+            "deleteDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": start_index,
+                    "endIndex": end_index,
+                }
+            }
+        }]
+    }
+    sheets.spreadsheets().batchUpdate(spreadsheetId=settings.google_sheet_id, body=body).execute()
+
+
+async def delete_old_sheet_rows(cutoff: datetime) -> int:
+    """Delete tracking-sheet rows older than ``cutoff`` (the "data table").
+
+    Rows are always appended in chronological order, so the old ones form
+    one contiguous block right after the header — deleted as a single row
+    range so the sheet compacts upward on its own, no manual re-indexing.
+    Returns the number of rows deleted.
+    """
+    time_values = await asyncio.to_thread(_read_sheet_time_column)
+
+    old_count = 0
+    for raw in time_values:
+        if not raw:
+            break
+        try:
+            row_time = datetime.strptime(raw, _SHEET_TIME_FORMAT)
+        except ValueError:
+            logger.warning(f"Unparseable time value in tracking sheet, stopping cleanup scan: {raw!r}")
+            break
+        if row_time >= cutoff:
+            break
+        old_count += 1
+
+    if old_count == 0:
+        return 0
+
+    sheet_id = await asyncio.to_thread(_get_sheet_id)
+    # Row 1 is the header; data starts at row 2 (0-indexed row 1).
+    await asyncio.to_thread(_delete_sheet_row_range, sheet_id, 1, 1 + old_count)
+    return old_count
+
+
+def _list_old_files_in_folder(folder_id: str, cutoff_iso: str) -> list[str]:
+    drive, _ = _clients()
+    file_ids: list[str] = []
+    page_token = None
+    query = f"'{folder_id}' in parents and trashed=false and createdTime < '{cutoff_iso}'"
+    while True:
+        resp = drive.files().list(
+            q=query, fields="nextPageToken, files(id)", pageToken=page_token
+        ).execute()
+        file_ids.extend(f["id"] for f in resp.get("files", []))
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return file_ids
+
+
+def _delete_drive_file(file_id: str) -> None:
+    drive, _ = _clients()
+    drive.files().delete(fileId=file_id).execute()
+
+
+async def delete_old_drive_files(cutoff: datetime) -> int:
+    """Delete every Q&A record file older than ``cutoff`` (the "conversation
+    process") across all known per-user Drive folders. Returns the number
+    of files deleted."""
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute(
+            "SELECT DISTINCT drive_folder_id FROM user_conversations WHERE drive_folder_id IS NOT NULL"
+        )
+        folder_ids = [r[0] for r in await cur.fetchall()]
+
+    cutoff_iso = cutoff.replace(tzinfo=_BEIJING_TZ).isoformat()
+    deleted = 0
+    for folder_id in folder_ids:
+        try:
+            file_ids = await asyncio.to_thread(_list_old_files_in_folder, folder_id, cutoff_iso)
+            for file_id in file_ids:
+                await asyncio.to_thread(_delete_drive_file, file_id)
+                deleted += 1
+        except Exception as e:
+            logger.error(f"Failed to clean up Drive folder {folder_id}: {e}")
+    return deleted
+
+
+async def cleanup_old_conversation_records(months: int = RETENTION_MONTHS) -> dict:
+    """Delete conversation records older than ``months`` months — both the
+    tracking-sheet rows (the data table) and the underlying per-user Drive
+    Q&A record files (the conversation content). Best-effort: called from a
+    background scheduler, failures are logged rather than raised."""
+    cutoff = _retention_cutoff(months)
+    deleted_rows = await delete_old_sheet_rows(cutoff)
+    deleted_files = await delete_old_drive_files(cutoff)
+    return {
+        "deleted_rows": deleted_rows,
+        "deleted_files": deleted_files,
+        "cutoff": cutoff.isoformat(),
+    }
