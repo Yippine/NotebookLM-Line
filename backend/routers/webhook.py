@@ -1,7 +1,7 @@
+import asyncio
 import hashlib
 import hmac
 import base64
-import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -14,6 +14,7 @@ from services.nlm_service import ask_question, update_knowledge_base
 from services.line_service import (
     show_loading,
     reply_text,
+    push_text,
     download_content,
     get_display_name,
 )
@@ -22,6 +23,12 @@ router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
+
+# The bot's display name in LINE (set separately in the LINE Official
+# Account Manager — this constant only controls what @-mention text this
+# code recognizes, it doesn't rename the account itself).
+BOT_NAME = "小選"
+_TEXT_MENTION_TRIGGERS = (f"@{BOT_NAME}", "@機器人")
 
 
 def verify_signature(body: bytes, signature: str, channel_secret: str) -> bool:
@@ -50,8 +57,21 @@ def _self_mentions(message: dict) -> list[dict]:
 
 
 def _has_text_mention(text: str) -> bool:
-    """Check if text contains @-mention syntax (fallback for desktop LINE)."""
-    return "@" in text
+    """Check if text explicitly @-mentions this bot by name — "@小選" or the
+    generic "@機器人" — rather than matching any bare "@" character. Fallback
+    path for desktop LINE clients that don't populate the structured
+    mention payload reliably."""
+    return any(trigger in text for trigger in _TEXT_MENTION_TRIGGERS)
+
+
+def _strip_text_mention_trigger(text: str) -> str:
+    """Remove a matched text-mention trigger (see _has_text_mention) from
+    the message. Used when there's no structured mention payload to strip
+    via index/length instead — otherwise the literal "@小選"/"@機器人" text
+    would leak into the question sent to NotebookLM."""
+    for trigger in _TEXT_MENTION_TRIGGERS:
+        text = text.replace(trigger, "")
+    return text.strip()
 
 
 _UPDATE_KB_KEYWORDS = ("更新知識庫", "更新資料庫", "更新資料")
@@ -159,6 +179,44 @@ def _strip_mentions(text: str, mentionees: list[dict]) -> str:
     return text.strip()
 
 
+async def _resolve_mention(
+    source_type: str,
+    sender_user_id: str | None,
+    group_id: str | None,
+    room_id: str | None,
+    access_token: str,
+) -> tuple[str | None, str | None]:
+    """Resolve the asker's (user_id, display_name) so the reply can
+    @mention them — only meaningful in group/room chats where several
+    people may be asking around the same time, and only possible when LINE
+    gave us a sender_user_id (it doesn't for group members who haven't
+    friended the OA)."""
+    if source_type not in ("group", "room") or not sender_user_id:
+        return None, None
+    display_name = await get_display_name(access_token, sender_user_id, group_id, room_id)
+    return sender_user_id, display_name
+
+
+async def _show_working_indicator(source_type: str, target_id: str, access_token: str, message: str) -> None:
+    """Best-effort "working on it" feedback while we synchronously wait for
+    the real reply.
+
+    1:1 chats get LINE's native loading animation (show_loading), which
+    doesn't touch the metered push quota. Group/room chats don't support
+    that API at all, so they fall back to a throwaway push message instead
+    — best-effort and silently ignored on failure, since losing this one
+    to the push quota just means no interim feedback, not a lost answer
+    (the actual answer always goes out via reply_text, never push).
+    """
+    if source_type == "user":
+        await show_loading(target_id, access_token, seconds=30)
+        return
+    try:
+        await push_text(target_id, access_token, message)
+    except Exception as e:
+        logger.warning(f"Best-effort working indicator failed (non-critical): {e}")
+
+
 @router.post("/webhook/{channel_id}")
 async def webhook(channel_id: str, request: Request):
     body = await request.body()
@@ -235,41 +293,66 @@ async def webhook(channel_id: str, request: Request):
         if message_type == "text":
             question = message["text"]
             if source_type in ("group", "room"):
-                question = _strip_mentions(question, _self_mentions(message))
-                if not question:
-                    await reply_text(reply_token, access_token, "請問想問什麼問題呢？")
-                    continue
+                mentions = _self_mentions(message)
+                question = (
+                    _strip_mentions(question, mentions) if mentions
+                    else _strip_text_mention_trigger(question)
+                )
+
+            # Resolved once per message and threaded through every reply
+            # below, so a busy group chat can see at a glance whose
+            # question each answer belongs to. None/None in 1:1 chats or
+            # when LINE didn't give us the sender's id.
+            mention_user_id, mention_display_name = await _resolve_mention(
+                source_type, sender_user_id, group_id, room_id, access_token
+            )
+
+            if source_type in ("group", "room") and not question:
+                # No question text left after stripping the mention —
+                # kept deliberately generic, no vendor name needed here.
+                await reply_text(
+                    reply_token, access_token, "請問想問什麼問題呢？",
+                    mention_user_id, mention_display_name,
+                )
+                continue
 
             logger.info(f"[{channel_id}] ({source_type}) Q: {question[:50]}")
 
             if _is_update_kb_request(question):
-                await reply_text(reply_token, access_token, "請上傳更新後的資料")
+                await reply_text(
+                    reply_token, access_token, "請上傳更新後的資料",
+                    mention_user_id, mention_display_name,
+                )
                 continue
 
             restricted_topic = classify_restricted_topic(question)
             if restricted_topic == "authorization_promise":
-                await reply_text(reply_token, access_token, _RESTRICTED_TOPIC_REPLY)
-                asyncio.create_task(_record_interaction(
+                await reply_text(
+                    reply_token, access_token, _RESTRICTED_TOPIC_REPLY,
+                    mention_user_id, mention_display_name,
+                )
+                await _record_interaction(
                     channel_id, group_id, room_id, sender_user_id, access_token,
                     question, _RESTRICTED_TOPIC_REPLY, "需人工聯絡",
-                ))
+                    display_name=mention_display_name,
+                )
                 continue
             if restricted_topic == "purchase":
-                if source_type == "user":
-                    await show_loading(target_id, access_token, seconds=30)
+                await _show_working_indicator(source_type, target_id, access_token, "⏳正在查詢中，請稍後")
 
                 await _purchase_intent_ask_and_reply(
                     channel_id, reply_token, access_token, question,
                     sender_user_id, group_id, room_id,
+                    mention_user_id, mention_display_name,
                 )
                 continue
 
-            if source_type == "user":
-                await show_loading(target_id, access_token, seconds=30)
+            await _show_working_indicator(source_type, target_id, access_token, "⏳正在查詢中，請稍後")
 
             await _ask_and_reply(
                 channel_id, reply_token, access_token, question,
                 sender_user_id, group_id, room_id,
+                mention_user_id, mention_display_name,
             )
             continue
 
@@ -277,8 +360,7 @@ async def webhook(channel_id: str, request: Request):
             file_name = message.get("fileName") or "uploaded_file"
             file_id = message.get("id")
 
-            if source_type == "user":
-                await show_loading(target_id, access_token, seconds=30)
+            await _show_working_indicator(source_type, target_id, access_token, "⏳正在更新知識庫，請稍後")
 
             await _upload_and_reply(
                 channel_id, reply_token, access_token, file_id, file_name,
@@ -295,6 +377,8 @@ async def _ask_and_reply(
     sender_user_id: str | None = None,
     group_id: str | None = None,
     room_id: str | None = None,
+    mention_user_id: str | None = None,
+    mention_display_name: str | None = None,
 ):
     """Answer a question and deliver it via the reply token (not push) —
     reply messages aren't metered against the account's monthly LINE
@@ -311,20 +395,23 @@ async def _ask_and_reply(
         answer_text = "\n".join(messages)
         if any(msg.startswith("⚠️") for msg in messages):
             status = "異常"
-        await reply_text(reply_token, access_token, messages)
+        await reply_text(reply_token, access_token, messages, mention_user_id, mention_display_name)
     except Exception as e:
         logger.error(f"[{channel_id}] Error: {e}")
         status = "異常"
         answer_text = f"系統發生錯誤：{e}"
         try:
-            await reply_text(reply_token, access_token, "⚠️ 系統發生錯誤，請稍後再試。")
+            await reply_text(
+                reply_token, access_token, "⚠️ 系統發生錯誤，請稍後再試。",
+                mention_user_id, mention_display_name,
+            )
         except Exception as reply_error:
             logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
 
-    asyncio.create_task(_record_interaction(
+    await _record_interaction(
         channel_id, group_id, room_id, sender_user_id, access_token,
-        question, answer_text, status,
-    ))
+        question, answer_text, status, display_name=mention_display_name,
+    )
 
 
 async def _purchase_intent_ask_and_reply(
@@ -335,6 +422,8 @@ async def _purchase_intent_ask_and_reply(
     sender_user_id: str | None,
     group_id: str | None = None,
     room_id: str | None = None,
+    mention_user_id: str | None = None,
+    mention_display_name: str | None = None,
 ):
     """Handle a purchase-intent question: refuse to discuss the transaction
     itself, but still look up which vendor's car matches and hand back that
@@ -346,28 +435,39 @@ async def _purchase_intent_ask_and_reply(
     same quota reason as ``_ask_and_reply``.
     """
     reply = _purchase_intent_reply()
+    status = "需人工聯絡"
     try:
         contact_query = _CONTACT_INFO_QUERY_TEMPLATE.format(question=question)
         messages = await ask_question(channel_id, contact_query, line_user_id=None)
-        vendor_messages = [m for m in messages if m.startswith("【")]
-        if vendor_messages:
-            intro = f"{_PURCHASE_INTENT_PREFIX}\n\n{_PURCHASE_INTENT_CONTACT_LEAD_IN}"
-            reply_messages = [intro] + vendor_messages
-            await reply_text(reply_token, access_token, reply_messages)
-            reply = "\n".join(reply_messages)
+        if any(m.startswith("⚠️") for m in messages):
+            # A real ask_question failure (unbound notebook, API error, etc.)
+            # — not "no vendor matched". Keep the polite generic reply for
+            # the user, but flag it so it doesn't look identical to a
+            # legitimate no-match case in the tracking log.
+            logger.error(f"[{channel_id}] Contact info lookup returned an error: {messages}")
+            status = "異常"
+            await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
         else:
-            await reply_text(reply_token, access_token, reply)
+            vendor_messages = [m for m in messages if m.startswith("【")]
+            if vendor_messages:
+                intro = f"{_PURCHASE_INTENT_PREFIX}\n\n{_PURCHASE_INTENT_CONTACT_LEAD_IN}"
+                reply_messages = [intro] + vendor_messages
+                await reply_text(reply_token, access_token, reply_messages, mention_user_id, mention_display_name)
+                reply = "\n".join(reply_messages)
+            else:
+                await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
     except Exception as e:
         logger.error(f"[{channel_id}] Error looking up vendor contact info: {e}")
+        status = "異常"
         try:
-            await reply_text(reply_token, access_token, reply)
+            await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
         except Exception as reply_error:
             logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
 
-    asyncio.create_task(_record_interaction(
+    await _record_interaction(
         channel_id, group_id, room_id, sender_user_id, access_token,
-        question, reply, "需人工聯絡",
-    ))
+        question, reply, status, display_name=mention_display_name,
+    )
 
 
 async def _record_interaction(
@@ -379,22 +479,52 @@ async def _record_interaction(
     question: str,
     answer: str,
     status: str,
+    display_name: str | None = None,
 ):
     """Log a Q&A as a text record in the user's Drive folder plus a row in
-    the tracking Sheet, ~2s after the reply is sent. Best-effort: failures
-    here never affect the LINE conversation, only get logged server-side."""
+    the tracking Sheet. Best-effort: failures here never affect the LINE
+    conversation, only get logged server-side.
+
+    ``display_name`` can be passed in already-resolved (e.g. group/room
+    chats already looked it up to build the reply's @mention) to skip a
+    redundant profile lookup; 1:1 chats don't resolve it beforehand, so
+    this fetches it here instead.
+
+    Awaited by the caller (not fire-and-forget) so it's still part of the
+    in-flight webhook request — a `docker compose up -d` restart (e.g. from
+    the tunnel watchdog swapping tunnels) sends SIGTERM and gives in-flight
+    requests a grace period to finish; an orphaned background task isn't
+    covered by that and would just get killed mid-write, silently dropping
+    the record.
+    """
     if not sender_user_id:
         return  # can't build a per-user folder without a stable identity
 
-    await asyncio.sleep(2)
     try:
-        display_name = await get_display_name(access_token, sender_user_id, group_id, room_id)
+        if display_name is None:
+            display_name = await get_display_name(access_token, sender_user_id, group_id, room_id)
         folder_id, folder_link = await google_log_service.get_or_create_user_folder(
             channel_id, sender_user_id, display_name
         )
         now = datetime.now(_BEIJING_TZ)
-        await google_log_service.save_text_record(folder_id, question, answer, now)
-        await google_log_service.append_sheet_row(now, display_name, folder_link, status)
+        # Independent of each other — both only need folder_id/folder_link
+        # from the step above, neither depends on the other's result — so
+        # run them concurrently instead of paying two sequential Google API
+        # round trips after the user has already gotten their reply.
+        # return_exceptions=True so a failure in one still lets the other
+        # finish before this coroutine returns — with the default
+        # return_exceptions=False, gather() raises as soon as the first
+        # awaitable fails and leaves the other running as an orphaned task,
+        # exactly the "gets killed mid-write on SIGTERM" risk this function
+        # is documented to avoid.
+        results = await asyncio.gather(
+            google_log_service.save_text_record(folder_id, question, answer, now),
+            google_log_service.append_sheet_row(now, display_name, folder_link, status),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
     except Exception as e:
         logger.error(f"[{channel_id}] Failed to record interaction to Google: {e}")
 

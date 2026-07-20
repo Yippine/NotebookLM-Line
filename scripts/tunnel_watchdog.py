@@ -175,15 +175,39 @@ def start_healthy_tunnel(max_attempts: int = 5) -> tuple[subprocess.Popen, str]:
     "Non-existent domain" even after the full grace period) — that's a bad
     tunnel, not a slow one. Discard it and request a brand new one rather
     than getting stuck waiting on a registration that will never resolve.
+    cloudflared itself occasionally fails to even report a hostname in
+    time — that counts as a failed attempt too, not a fatal error.
     """
     for attempt in range(1, max_attempts + 1):
-        proc, hostname = start_tunnel()
+        try:
+            proc, hostname = start_tunnel()
+        except RuntimeError as e:
+            log(f"tunnel candidate failed to start (attempt {attempt}/{max_attempts}): {e}")
+            continue
         log(f"tunnel candidate: https://{hostname} (attempt {attempt}/{max_attempts})")
         if wait_until_reachable(hostname):
             return proc, hostname
         log(f"{hostname} never became reachable, discarding and requesting a fresh tunnel")
         proc.kill()
     raise RuntimeError(f"failed to get a reachable tunnel after {max_attempts} attempts")
+
+
+def _retry_forever(description: str, fn, backoff_seconds: float = 30.0):
+    """Keep calling ``fn`` until it succeeds, logging and backing off between
+    failures instead of propagating.
+
+    A watchdog that can be killed by its own transient failure (a bad
+    cloudflared start, a hiccup in ``docker compose up``, a flaky LINE API
+    call) isn't actually watching anything once it's dead — every recovery
+    step needs to survive being retried indefinitely rather than crash the
+    process and silently leave the webhook down until a human notices.
+    """
+    while True:
+        try:
+            return fn()
+        except Exception as e:
+            log(f"{description} failed ({e}); retrying in {backoff_seconds:.0f}s")
+            time.sleep(backoff_seconds)
 
 
 def apply_new_hostname(hostname: str) -> None:
@@ -196,13 +220,9 @@ def apply_new_hostname(hostname: str) -> None:
 
 
 def main() -> None:
-    proc, hostname = start_healthy_tunnel()
+    proc, hostname = _retry_forever("establishing a healthy tunnel", start_healthy_tunnel)
     log(f"tunnel up: https://{hostname}")
-    try:
-        apply_new_hostname(hostname)
-    except Exception:
-        proc.kill()
-        raise
+    _retry_forever("applying new tunnel hostname", lambda: apply_new_hostname(hostname))
 
     try:
         while True:
@@ -210,13 +230,9 @@ def main() -> None:
             if not is_dns_alive(hostname):
                 log("tunnel appears dead, restarting cloudflared...")
                 proc.kill()
-                proc, hostname = start_healthy_tunnel()
+                proc, hostname = _retry_forever("establishing a healthy tunnel", start_healthy_tunnel)
                 log(f"tunnel back up: https://{hostname}")
-                try:
-                    apply_new_hostname(hostname)
-                except Exception:
-                    proc.kill()
-                    raise
+                _retry_forever("applying new tunnel hostname", lambda: apply_new_hostname(hostname))
     except KeyboardInterrupt:
         log("stopping, killing tunnel process")
         proc.kill()

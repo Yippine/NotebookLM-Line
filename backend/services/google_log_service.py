@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 RETENTION_MONTHS = 4
 _BEIJING_TZ = timezone(timedelta(hours=8))
 _SHEET_TIME_FORMAT = "%Y/%m/%d %H:%M:%S"
+_SHEET_TIME_NUMBER_FORMAT_PATTERN = "yyyy/mm/dd hh:mm:ss"  # Sheets pattern syntax, must match _SHEET_TIME_FORMAT above
 
 
 def _load_credentials() -> Credentials:
@@ -71,15 +73,58 @@ def _upload_text_record(folder_id: str, file_name: str, content: str) -> str:
     return file["webViewLink"]
 
 
+def _apply_time_column_format(row_number: int) -> None:
+    """Ensure a single row's time cell (column A) displays as a date, not a
+    raw serial number.
+
+    ``values.append`` with ``insertDataOption=INSERT_ROWS`` genuinely
+    inserts a new grid row — it does NOT inherit whatever number format a
+    prior wide-range ``repeatCell`` fix applied to that row index, since
+    the row didn't exist yet at the time. So this has to be (re-)applied
+    per row, right after it's appended, rather than relying on a one-time
+    pre-format of a wide row range.
+    """
+    _, sheets = _clients()
+    sheet_id = _get_sheet_id()
+    body = {
+        "requests": [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": row_number - 1,
+                    "endRowIndex": row_number,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "numberFormat": {
+                            "type": "DATE_TIME",
+                            "pattern": _SHEET_TIME_NUMBER_FORMAT_PATTERN,
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat.numberFormat",
+            }
+        }]
+    }
+    sheets.spreadsheets().batchUpdate(spreadsheetId=settings.google_sheet_id, body=body).execute()
+
+
 def _append_sheet_row(row: list[str]) -> None:
     _, sheets = _clients()
-    sheets.spreadsheets().values().append(
+    result = sheets.spreadsheets().values().append(
         spreadsheetId=settings.google_sheet_id,
         range="A:E",
         valueInputOption="USER_ENTERED",
         insertDataOption="INSERT_ROWS",
         body={"values": [row]},
     ).execute()
+
+    updated_range = result.get("updates", {}).get("updatedRange", "")
+    match = re.search(r"!A(\d+)", updated_range)
+    if match:
+        _apply_time_column_format(int(match.group(1)))
 
 
 async def get_or_create_user_folder(channel_id: str, line_user_id: str, display_name: str) -> tuple[str, str]:

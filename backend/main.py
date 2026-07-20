@@ -68,6 +68,10 @@ async def lifespan(app: FastAPI):
     yield
     expiry_task.cancel()
     retention_task.cancel()
+    from services.line_service import aclose_client
+    from services.nlm_service import aclose_all_clients
+    await aclose_client()
+    await aclose_all_clients()
 
 
 app = FastAPI(title="NotebookLM LINE Bot Platform", lifespan=lifespan)

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import asyncio
 import mimetypes
@@ -11,8 +12,84 @@ from services.doc_converter import convert_to_markdown
 from database import DB
 import aiosqlite
 
+logger = logging.getLogger(__name__)
+
 # Lock to prevent concurrent env var overwrites
 _nlm_lock = asyncio.Lock()
+
+# Reused NotebookLMClient sessions, keyed by channel_id. ask_question is
+# called on every single LINE message, and opening a session via
+# _run_with_auth builds a brand-new httpx.AsyncClient (cold connection pool,
+# so the first RPC pays a fresh TCP/TLS handshake) and closing one writes
+# the cookie jar to disk — pure overhead when the same channel asks another
+# question moments later. Only the hot ask path uses this cache; the
+# infrequent admin operations (upload, configure, list) still go through
+# _run_with_auth's open-then-close-per-call path, since one extra handshake
+# there is negligible next to those operations' own latency and keeping the
+# scope narrow limits the blast radius of a caching bug.
+_client_cache: dict[str, tuple] = {}
+_client_cache_lock = asyncio.Lock()
+
+
+async def _get_cached_client(channel_id: str, auth_json: dict):
+    """Return a cached, already-open NotebookLMClient for this channel,
+    opening one on first use."""
+    async with _client_cache_lock:
+        cached = _client_cache.get(channel_id)
+        if cached is not None:
+            return cached[1]
+
+        client_ctx = NotebookLMClient.from_storage()
+        async with _nlm_lock:
+            old = os.environ.get("NOTEBOOKLM_AUTH_JSON")
+            os.environ["NOTEBOOKLM_AUTH_JSON"] = json.dumps(auth_json)
+            try:
+                client = await client_ctx.__aenter__()
+            finally:
+                if old is None:
+                    os.environ.pop("NOTEBOOKLM_AUTH_JSON", None)
+                else:
+                    os.environ["NOTEBOOKLM_AUTH_JSON"] = old
+
+        _client_cache[channel_id] = (client_ctx, client)
+        return client
+
+
+async def _invalidate_client(channel_id: str) -> None:
+    """Drop and close a channel's cached session, e.g. because it went
+    stale or because the channel's auth was just replaced by bind_nlm."""
+    async with _client_cache_lock:
+        cached = _client_cache.pop(channel_id, None)
+    if cached is not None:
+        client_ctx, _ = cached
+        try:
+            await client_ctx.__aexit__(None, None, None)
+        except Exception:
+            logger.warning("Failed to close stale NotebookLM session for channel %s", channel_id)
+
+
+async def aclose_all_clients() -> None:
+    """Close every cached NotebookLM session. Call on app shutdown."""
+    async with _client_cache_lock:
+        cached_items = list(_client_cache.items())
+        _client_cache.clear()
+    for channel_id, (client_ctx, _) in cached_items:
+        try:
+            await client_ctx.__aexit__(None, None, None)
+        except Exception:
+            logger.warning("Failed to close NotebookLM session for channel %s", channel_id)
+
+# Cache of client.sources.list(notebook_id) results, keyed by notebook_id.
+# ask_question needs the id->title map on nearly every question just to
+# label citations, but sources only actually change via
+# replace_sources_for_notebook (which invalidates the relevant entry) — so
+# re-fetching the full list on every single question is a pure-overhead
+# API round-trip most of the time.
+_sources_cache: dict[str, list] = {}
+
+
+def _invalidate_sources_cache(notebook_id: str) -> None:
+    _sources_cache.pop(notebook_id, None)
 
 # Priority instruction enforced at the NotebookLM notebook level (not just the
 # LINE-side keyword filter in routers/webhook.py), so the model itself refuses
@@ -88,6 +165,10 @@ async def bind_nlm(channel_id: str, storage_state: dict):
             (encrypted, notebook_id, channel_id),
         )
         await db.commit()
+
+    # Any cached session for this channel was opened with the old auth —
+    # drop it so the next ask_question opens a fresh one with the new auth.
+    await _invalidate_client(channel_id)
 
     return notebook_id, notebooks
 
@@ -182,6 +263,8 @@ async def replace_sources_for_notebook(
             )
             for source_item in duplicate_sources:
                 await client.sources.delete(notebook_id, source_item.id)
+
+            _invalidate_sources_cache(notebook_id)
 
             final_title = source.title or uploaded_title
             if duplicate_sources:
@@ -296,7 +379,10 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
         # Build source_id → title map
         source_map = {}
         if result.references:
-            sources = await client.sources.list(notebook_id)
+            sources = _sources_cache.get(notebook_id)
+            if sources is None:
+                sources = await client.sources.list(notebook_id)
+                _sources_cache[notebook_id] = sources
             id_to_title = {s.id: s.title for s in sources}
             for ref in result.references:
                 if ref.citation_number is not None and ref.source_id in id_to_title:
@@ -304,7 +390,17 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
         return result.answer, result.conversation_id, source_map
 
     try:
-        answer, new_conversation_id, source_map = await _run_with_auth(storage_state, _ask)
+        try:
+            client = await _get_cached_client(channel_id, storage_state)
+            answer, new_conversation_id, source_map = await _ask(client)
+        except Exception:
+            # The cached session may have gone stale (dropped connection,
+            # expired cookies) — drop it and retry once with a freshly
+            # opened session before surfacing an error to the user.
+            await _invalidate_client(channel_id)
+            client = await _get_cached_client(channel_id, storage_state)
+            answer, new_conversation_id, source_map = await _ask(client)
+
         if line_user_id and new_conversation_id:
             await _save_conversation_id(channel_id, line_user_id, new_conversation_id)
         return build_answer_messages(format_for_line(answer), source_map)
