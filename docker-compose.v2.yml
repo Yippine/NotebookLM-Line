@@ -1,0 +1,54 @@
+name: ${COMPOSE_PROJECT_NAME:-nlm-line-v2}
+
+services:
+  backend:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-nlm-line-v2}-backend
+    restart: unless-stopped
+    # Must exceed LINE_BACKGROUND_SHUTDOWN_TIMEOUT_SECONDS so normal deploys
+    # can drain or release durable work before Docker sends SIGKILL.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    env_file:
+      - ${V2_ENV_FILE:-./backend/.env.v2}
+    # /app/data is a dedicated V2 mount. Docker may create a missing bind
+    # source as 0755, so make this one known directory private before startup;
+    # init_db independently verifies the result and keeps the DB at 0600.
+    command:
+      - sh
+      - -c
+      - chmod 700 /app/data && exec uvicorn main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ${V2_DATA_DIR:-./data-v2}:/app/data
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-nlm-line-v2}-frontend
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      # Only the local Cloudflare Tunnel / reverse proxy may reach V2.
+      - "127.0.0.1:${V2_APP_PORT:-8085}:80"
+    depends_on:
+      backend:
+        condition: service_healthy

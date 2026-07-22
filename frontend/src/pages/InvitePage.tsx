@@ -1,6 +1,6 @@
 import { useState, FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import { verifyInvite } from "../lib/api";
+import { ApiError, formatApiError, verifyInvite } from "../lib/api";
 
 export default function InvitePage() {
   const [code, setCode] = useState("");
@@ -17,10 +17,16 @@ export default function InvitePage() {
       sessionStorage.setItem("token", res.token);
       if (res.channel_id) {
         sessionStorage.setItem("channel_id", res.channel_id);
+      } else {
+        sessionStorage.removeItem("channel_id");
       }
       navigate("/setup");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "驗證失敗");
+      setError(
+        err instanceof ApiError && err.statusCode === 400
+          ? "邀請碼無效、已過期，或課程已結束。"
+          : formatApiError(err, "驗證失敗，請稍後再試。"),
+      );
     } finally {
       setLoading(false);
     }

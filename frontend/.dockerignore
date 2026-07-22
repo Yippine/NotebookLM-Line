@@ -1,0 +1,8 @@
+.env
+.env.*
+node_modules/
+dist/
+*.tsbuildinfo
+src/**/*.test.*
+src/test/
+vitest.config.ts

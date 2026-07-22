@@ -1,13 +1,16 @@
 backend/.env
+backend/.env.v2
 backend/data.db
 backend/test_data.db
 backend/test/
 data/
+data-v2/
 *.pyc
 __pycache__/
 venv/
 node_modules/
 frontend/dist/
+*.tsbuildinfo
 .pytest_cache/
 login-tool/
 .kiro/

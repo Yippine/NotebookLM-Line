@@ -1,0 +1,7 @@
+tunnel: ai-notebook-v2
+credentials-file: /home/leo/.cloudflared/7270553b-13ab-4900-99cf-7f502de4b734.json
+
+ingress:
+  - hostname: ai-notebook-v2.leopilot.com
+    service: http://localhost:8085
+  - service: http_status:404
