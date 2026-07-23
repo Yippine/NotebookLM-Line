@@ -5,6 +5,7 @@
 ## What Changes（變更內容）
 
 - 管理者設定一個一般 Gmail 作為課程專用 NotebookLM 帳號，並只在伺服器端完成一次登入與後續重新驗證。
+- 課程帳號授權採可持久續期的 `storage_state`；每次 NotebookLM 操作或健康檢查產生的 Cookie 輪替，必須驗證後以加密資料與 revision/CAS 寫回，不能隨臨時檔刪除。
 - 學員將自己建立的 NotebookLM 私下分享給指定課程帳號，權限設為檢視者。
 - 學員在設定頁貼上自己的 NotebookLM 網址；系統擷取 Notebook ID、驗證課程帳號的存取權，並執行最小聊天測試。
 - 系統保存 `LINE Channel ID → Notebook ID` 對應，不再保存每位學員的 Google Cookie。
@@ -35,9 +36,9 @@
 
 - 前端：`frontend/src/pages/SetupPage.tsx`、設定 API 呼叫與綁定狀態畫面。
 - 後端：NotebookLM 綁定模型與路由、課程帳號授權服務、NotebookLM 查詢服務及 LINE Webhook 錯誤處理。
-- 資料庫：新增課程帳號設定／健康狀態資料；Channel 保留 Notebook ID，但淘汰每位學員的加密 NotebookLM Cookie。
+- 資料庫：新增課程帳號設定／健康狀態資料及授權 revision；Channel 保留 Notebook ID，但淘汰每位學員的加密 NotebookLM Cookie。輪替後的課程帳號授權會以比較並交換方式加密寫回。
 - 管理後台與資料庫：每個 Channel 保存獨立到期時間，邀請碼保存可編輯的學員姓名；批次日期欄位只作為本次選取操作的輸入，不作為新學員預設值。
 - 安全：綁定權杖、CORS allowlist、固定加密金鑰、敏感資料紀錄遮蔽與速率限制。
 - 相依套件：鎖定 `notebooklm-py` 的驗證版本，並遵循其非官方 API 可能變更的維護風險。
-- 營運：課程帳號成為集中式依賴，需要登入失效告警、重新驗證與 NotebookLM 用量監控。
+- 營運：課程帳號成為集中式依賴，需要每 15 分鐘健康刷新、授權寫回失敗告警、登入失效重新驗證與 NotebookLM 用量監控。
 - 測試：一般 Gmail 私下分享、Viewer Notebook 問答、多學員隔離、撤銷分享、並發查詢、登入失效與 LINE 非同步回覆。

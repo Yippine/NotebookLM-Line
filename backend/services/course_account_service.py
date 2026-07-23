@@ -8,6 +8,7 @@ models and deliberately records only coarse error codes.
 from __future__ import annotations
 
 import asyncio
+import copy
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -51,6 +52,59 @@ class CourseAccountRecord:
         data.pop("auth_encrypted", None)
         data.pop("auth_revision", None)
         return data
+
+
+class AuthorizationPayload(dict[str, Any]):
+    """Mutable storage state plus safe persistence outcome metadata."""
+
+    def __init__(self, payload: dict[str, Any]):
+        super().__init__(copy.deepcopy(payload))
+        self.original_payload = copy.deepcopy(payload)
+        self.persistence_error: str | None = None
+
+
+def _validate_storage_state(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("storage state must be an object")
+    cookies = payload.get("cookies")
+    if not isinstance(cookies, list) or not cookies:
+        raise ValueError("storage state must contain cookies")
+    names: set[str] = set()
+    sid_is_usable = False
+    for cookie in cookies:
+        if not isinstance(cookie, dict):
+            raise ValueError("cookie must be an object")
+        name = cookie.get("name")
+        value = cookie.get("value")
+        if not isinstance(name, str) or not name:
+            raise ValueError("cookie name is required")
+        if not isinstance(value, str):
+            raise ValueError("cookie value must be a string")
+        names.add(name)
+        if name == "SID" and value:
+            sid_is_usable = True
+    if "SID" not in names or not sid_is_usable:
+        raise ValueError("SID cookie is required")
+    return payload
+
+
+def _storage_state_signature(payload: dict[str, Any]) -> str:
+    """Compare storage states without treating cookie-list order as a change."""
+
+    normalized = copy.deepcopy(payload)
+    cookies = normalized.get("cookies")
+    if isinstance(cookies, list):
+        normalized["cookies"] = sorted(
+            cookies,
+            key=lambda cookie: (
+                str(cookie.get("domain", "")),
+                str(cookie.get("path", "")),
+                str(cookie.get("name", "")),
+            ),
+        )
+    return json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 class CourseAccountRepository:
@@ -182,6 +236,27 @@ class CourseAccountRepository:
             await db.commit()
         return await self.get(), cursor.rowcount == 1
 
+    async def persist_authorization_if_current(
+        self,
+        record: CourseAccountRecord,
+        auth_payload: dict[str, Any],
+    ) -> tuple[CourseAccountRecord | None, bool]:
+        """Encrypt and save rotated cookies without overwriting a newer login."""
+
+        encrypted = encrypt_json(auth_payload)
+        updated_at = utc_now_iso()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                UPDATE course_notebook_account
+                SET auth_encrypted=?, auth_revision=auth_revision + 1, updated_at=?
+                WHERE id=1 AND auth_revision=?
+                """,
+                (encrypted, updated_at, record.auth_revision),
+            )
+            await db.commit()
+        return await self.get(), cursor.rowcount == 1
+
 
 class NotebookClient(Protocol):
     notebooks: Any
@@ -219,6 +294,18 @@ async def default_client_context(
             max_concurrent_rpcs=1,
         ) as client:
             yield client
+        try:
+            with open(path, encoding="utf-8") as handle:
+                updated_payload = _validate_storage_state(json.load(handle))
+        except Exception:
+            if isinstance(auth_payload, AuthorizationPayload):
+                auth_payload.persistence_error = "auth_persistence_failed"
+            logger.error(
+                "course_account_auth_persistence outcome=invalid_storage_state"
+            )
+        else:
+            auth_payload.clear()
+            auth_payload.update(updated_payload)
     finally:
         if fd >= 0:
             os.close(fd)
@@ -281,7 +368,12 @@ def classify_notebook_error(
         or rpc_code == 401
         or any(
             marker in message
-            for marker in ("sign in", "login expired", "cookie expired")
+            for marker in (
+                "sign in",
+                "login expired",
+                "cookie expired",
+                "authentication expired or invalid",
+            )
         )
     ):
         return NotebookServiceError(
@@ -328,6 +420,7 @@ class QueryMetrics:
 
     def __init__(self):
         self._counts: Counter[str] = Counter()
+        self._events: Counter[str] = Counter()
         self._latency_total = 0.0
         self._latency_max = 0.0
 
@@ -336,10 +429,14 @@ class QueryMetrics:
         self._latency_total += duration
         self._latency_max = max(self._latency_max, duration)
 
+    def record_event(self, event: str) -> None:
+        self._events[event] += 1
+
     def snapshot(self) -> dict[str, Any]:
         total = sum(self._counts.values())
         return {
             "counts": dict(self._counts),
+            "events": dict(self._events),
             "requests": total,
             "latency_seconds_avg": self._latency_total / total if total else 0.0,
             "latency_seconds_max": self._latency_max,
@@ -493,7 +590,69 @@ class CourseAccountService:
                 http_status=503,
                 user_message="課程 NotebookLM 帳號暫時無法連線，請聯繫管理者。",
             ) from exc
-        return record, payload
+        return record, AuthorizationPayload(payload)
+
+    async def _record_persistence_failure(
+        self, record: CourseAccountRecord
+    ) -> CourseAccountRecord | None:
+        self.client_factory.metrics.record_event("auth_persistence_failed")
+        logger.error("course_account_auth_persistence outcome=failed")
+        try:
+            updated, _ = await self.repository.update_health_if_current(
+                record, "error", error_code="auth_persistence_failed"
+            )
+            return updated
+        except Exception:
+            logger.error("course_account_auth_persistence outcome=health_update_failed")
+            return None
+
+    async def mark_query_success(
+        self,
+        record: CourseAccountRecord,
+        auth_payload: dict[str, Any] | None = None,
+    ) -> bool:
+        """Persist rotations, then mark a still-current account healthy.
+
+        Persistence failures never discard an otherwise successful answer. A
+        stale CAS candidate is also harmless: a concurrent request already
+        saved a newer revision, so the next operation will load that revision.
+        """
+
+        current_record = record
+        if isinstance(auth_payload, AuthorizationPayload):
+            if auth_payload.persistence_error:
+                await self._record_persistence_failure(record)
+                return True
+            try:
+                changed = _storage_state_signature(
+                    auth_payload.original_payload
+                ) != _storage_state_signature(auth_payload)
+                if changed:
+                    (
+                        current,
+                        applied,
+                    ) = await self.repository.persist_authorization_if_current(
+                        record, _validate_storage_state(dict(auth_payload))
+                    )
+                    if applied and current is not None:
+                        current_record = current
+                    elif current is None:
+                        return False
+                    elif (current.email or "").casefold() != (
+                        record.email or ""
+                    ).casefold():
+                        return False
+                    else:
+                        # A concurrent rotation/re-auth for the same account won.
+                        return True
+            except Exception:
+                await self._record_persistence_failure(record)
+                return True
+
+        _, applied = await self.repository.update_health_if_current(
+            current_record, "healthy", success=True
+        )
+        return applied
 
     async def configure(
         self,
@@ -534,11 +693,18 @@ class CourseAccountService:
                 )
 
         # Validate first.  Any exception leaves the previous DB row untouched.
-        await self.client_factory.run(auth_payload, "configure_probe", probe)
+        candidate = AuthorizationPayload(auth_payload)
+        await self.client_factory.run(candidate, "configure_probe", probe)
+        if candidate.persistence_error:
+            raise NotebookServiceError(
+                "auth_persistence_failed",
+                http_status=503,
+                user_message="授權驗證成功，但無法安全保存更新後的登入狀態，請稍後再試。",
+            )
         checked_at = utc_now_iso()
         record = await self.repository.replace_authorization(
             email=normalized_email,
-            auth_payload=auth_payload,
+            auth_payload=dict(candidate),
             auth_mode=auth_mode,
             checked_at=checked_at,
         )
@@ -563,10 +729,8 @@ class CourseAccountService:
             )
             return updated.safe_dict() if updated else await self.status()
 
-        updated, _ = await self.repository.update_health_if_current(
-            checked_record, "healthy", success=True
-        )
-        return updated.safe_dict() if updated else await self.status()
+        await self.mark_query_success(checked_record, payload)
+        return await self.status()
 
     async def mark_query_failure(
         self, record: CourseAccountRecord, error: NotebookServiceError
@@ -583,12 +747,6 @@ class CourseAccountService:
             return applied
         current = await self.repository.get()
         return bool(current and current.auth_revision == record.auth_revision)
-
-    async def mark_query_success(self, record: CourseAccountRecord) -> bool:
-        _, applied = await self.repository.update_health_if_current(
-            record, "healthy", success=True
-        )
-        return applied
 
 
 course_account_repository = CourseAccountRepository()

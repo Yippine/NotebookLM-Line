@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
+import os
 import sqlite3
+import sys
 from types import SimpleNamespace
 import pytest
 
 from config import settings
 from database import init_db
 from services.course_account_service import (
+    AuthorizationPayload,
     CentralNotebookClientFactory,
     CourseAccountRepository,
     CourseAccountService,
     NotebookServiceError,
     classify_notebook_error,
+    default_client_context,
 )
 from services.crypto_service import decrypt_json, reset_encryption_cache
 
@@ -320,3 +325,134 @@ def test_upstream_errors_are_classified_without_returning_details(exception, cod
     result = classify_notebook_error(exception)
     assert result.code == code
     assert "secret" not in result.user_message
+
+
+def test_exact_expired_message_and_transient_503_are_distinguished():
+    expired = classify_notebook_error(
+        RuntimeError("Authentication expired or invalid. Please log in again.")
+    )
+    transient_type = type("ServerError", (Exception,), {"status_code": 503})
+    transient = classify_notebook_error(transient_type("temporary secret"))
+
+    assert expired.code == "course_auth_expired"
+    assert transient.code == "upstream_unavailable"
+
+
+@pytest.mark.anyio
+async def test_default_client_context_reads_rotated_cookies_and_removes_temp_file(
+    monkeypatch,
+):
+    captured_path = None
+
+    class FakeStorageContext:
+        def __init__(self, path):
+            self.path = path
+
+        async def __aenter__(self):
+            nonlocal captured_path
+            captured_path = self.path
+            with open(self.path, encoding="utf-8") as handle:
+                state = json.load(handle)
+            state["cookies"][0]["value"] = "rotated"
+            with open(self.path, "w", encoding="utf-8") as handle:
+                json.dump(state, handle)
+            return FakeClient()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class FakeNotebookLMClient:
+        @classmethod
+        def from_storage(cls, path, **_kwargs):
+            return FakeStorageContext(path)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "notebooklm",
+        SimpleNamespace(NotebookLMClient=FakeNotebookLMClient),
+    )
+    payload = AuthorizationPayload(
+        {"cookies": [{"name": "SID", "value": "original"}], "origins": []}
+    )
+
+    async with default_client_context(payload, 1):
+        pass
+
+    assert payload["cookies"][0]["value"] == "rotated"
+    assert payload.persistence_error is None
+    assert captured_path is not None and not os.path.exists(captured_path)
+
+
+@pytest.mark.anyio
+async def test_rotated_authorization_is_encrypted_and_stale_writer_is_discarded(
+    tmp_path,
+):
+    path = str(tmp_path / "account.db")
+    await init_db(path)
+    repository = CourseAccountRepository(path)
+    factory = CentralNotebookClientFactory(
+        max_concurrency=1,
+        timeout_seconds=1,
+        context_builder=builder_for(),
+    )
+    service = CourseAccountService(repository, factory)
+    await service.configure(
+        email="course@example.com",
+        auth_payload={"cookies": [{"name": "SID", "value": "original"}]},
+    )
+    record, first = await service.require_authorization()
+    _, stale = await service.require_authorization(record)
+    first["cookies"][0]["value"] = "first-rotation"
+    stale["cookies"][0]["value"] = "stale-rotation"
+
+    assert await service.mark_query_success(record, first) is True
+    assert await service.mark_query_success(record, stale) is True
+
+    current = await repository.get()
+    assert current is not None
+    assert current.auth_revision == record.auth_revision + 1
+    assert decrypt_json(current.auth_encrypted)["cookies"][0]["value"] == (
+        "first-rotation"
+    )
+    assert "first-rotation" not in current.auth_encrypted
+
+    restarted_service = CourseAccountService(
+        CourseAccountRepository(path),
+        CentralNotebookClientFactory(
+            max_concurrency=1,
+            timeout_seconds=1,
+            context_builder=builder_for(),
+        ),
+    )
+    _, restarted_payload = await restarted_service.require_authorization()
+    assert restarted_payload["cookies"][0]["value"] == "first-rotation"
+
+
+@pytest.mark.anyio
+async def test_persistence_failure_keeps_answer_success_and_sets_safe_health_error(
+    tmp_path,
+):
+    path = str(tmp_path / "account.db")
+    await init_db(path)
+    repository = CourseAccountRepository(path)
+    factory = CentralNotebookClientFactory(
+        max_concurrency=1,
+        timeout_seconds=1,
+        context_builder=builder_for(),
+    )
+    service = CourseAccountService(repository, factory)
+    await service.configure(
+        email="course@example.com",
+        auth_payload={"cookies": [{"name": "SID", "value": "original"}]},
+    )
+    record, payload = await service.require_authorization()
+    payload.persistence_error = "auth_persistence_failed"
+
+    assert await service.mark_query_success(record, payload) is True
+
+    current = await repository.get()
+    assert current is not None
+    assert current.health_status == "error"
+    assert current.error_code == "auth_persistence_failed"
+    assert decrypt_json(current.auth_encrypted)["cookies"][0]["value"] == "original"
+    assert factory.metrics.snapshot()["events"]["auth_persistence_failed"] == 1

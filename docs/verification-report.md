@@ -1,6 +1,6 @@
 # Shared Notebook Binding 驗證紀錄
 
-- 日期：2026-07-22
+- 日期：2026-07-23
 - 分支：`feature/shared-notebook-binding`
 - 環境：本機隔離 V2 容器＋獨立 Cloudflare Tunnel
 - 結論：**程式與部署封裝檢查通過，但尚未核准正式上線**
@@ -9,8 +9,8 @@
 
 | 檢查 | 結果 |
 |---|---|
-| 後端單元／整合／安全回歸 | 163 passed |
-| 前端元件與 API 測試 | 18 passed |
+| 後端單元／整合／安全回歸 | 175 passed |
+| 前端元件與 API 測試 | 22 passed |
 | Python Ruff lint／format | passed |
 | Python compileall | passed |
 | 前端 TypeScript＋Vite production build | passed |
@@ -29,8 +29,8 @@
 
 本次通過 smoke test 的本機 image ID：
 
-- backend：`sha256:0dc4e8d7474178ece8c4c9c696b47ce8068c644ff6259d9b4ff41c25944c1314`
-- frontend：`sha256:f9f2278f472d63d1671eda03b3003cf8d413320b94bc1bc60a5cd8853d1694b4`
+- backend：`sha256:e2778145291fb70102454078dc72ba53ca9b8cbc4ef253167aad3ee6ac91a4f0`
+- frontend：`sha256:8fa6f9e9179dc5078bd0d3e1bff876d935e95523c0f2151b316a8850322c0ea2`
 
 以上為本機 content ID；實際發布到 registry 後仍須記錄 registry digest 與 SBOM。
 
@@ -43,7 +43,7 @@
 1. 使用課程專用一般 Gmail 與至少兩個學員 Gmail，驗證 Viewer 私人分享、邀請接受方式及實際 URL。
 2. 對兩本可區分 Notebook 執行 `notebooks.get`、`chat.ask`、引用來源、取消／恢復分享、刪除 Notebook、登出、限流與暫時性錯誤測試。
 3. 測量真實延遲、同時查詢與配額歸屬，再確認並發與逾時設定。
-4. 決定並驗證授權持久化策略。候選 `notebooklm-py==0.7.3` 可能把輪替後 Cookie 寫回 storage；目前短效臨時檔會被刪除，尚未證實適合長期服務。必須以持久 profile、durable master token 或安全的加密 CAS 回寫方案完成 PoC。
+4. 已實作加密 storage state 的 revision/CAS 寫回、並行舊版本防覆蓋、持久化失敗健康狀態及重啟載入測試；仍須以真實課程 Gmail 連續至少 48 小時驗證每 15 分鐘刷新與實際 Cookie 輪替。
 5. 授權檔若沒有 account email metadata，Gmail 身分比對只能由管理者人工確認；真實驗收必須確認實際格式是否能強制自動比對。
 6. 用 V2 測試 LINE Channel 完成分享、貼 URL、LINE 提問、引用、取消分享、重新分享與管理員重新驗證的端到端測試。
 7. 在隔離 V2 實際演練資料庫備份／還原、功能旗標回滾、LINE 明文憑證清理及不可逆舊 Cookie 清除。

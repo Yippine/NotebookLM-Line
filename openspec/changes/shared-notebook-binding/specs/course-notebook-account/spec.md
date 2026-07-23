@@ -43,6 +43,47 @@
 - **THEN** 系統將狀態設為 `error` 或保留最近健康狀態並記錄錯誤時間
 - **THEN** 系統不得把暫時性錯誤誤判為所有 Notebook 已撤銷分享
 
+### Requirement: 持久保存 NotebookLM 輪替授權
+系統 MUST 將加密資料庫中的課程帳號 `storage_state` 視為唯一授權來源，並在一般查詢與至少每 15 分鐘一次的健康檢查完成後，安全保存 NotebookLM client 產生的有效 Cookie 輪替。
+
+#### Scenario: 成功操作產生新的 Cookie 狀態
+- **WHEN** NotebookLM 操作成功，且 client 使用的 storage state 已發生實質變更
+- **THEN** 系統在刪除短效臨時檔前驗證更新後的 JSON 與必要 Cookie
+- **THEN** 系統重新加密授權，使用原始 `auth_revision` 比較並交換寫回，成功後遞增 revision
+
+#### Scenario: 授權內容沒有變更
+- **WHEN** NotebookLM 操作完成，但更新後的 storage state 與原資料語意相同
+- **THEN** 系統不建立不必要的資料庫 revision
+- **THEN** 系統仍刪除包含明文授權的短效臨時檔
+
+#### Scenario: 並行操作遇到較新授權版本
+- **WHEN** client 準備寫回時，資料庫 `auth_revision` 已不是該 client 建立時讀取的版本
+- **THEN** 系統不得用舊候選授權覆蓋較新的加密授權
+- **THEN** 系統捨棄舊候選值，且下一次操作重新載入最新 revision
+
+#### Scenario: 回答成功但授權寫回失敗
+- **WHEN** NotebookLM 已產生有效回答，但更新後的授權無法驗證、加密或寫回
+- **THEN** 系統可交付本次回答，但保存不含秘密值的 `auth_persistence_failed` 狀態並通知維運者
+- **THEN** 系統不得將 Cookie、storage state 或解密內容寫入 log 或回傳給使用者
+
+#### Scenario: 服務重新啟動
+- **WHEN** backend 或容器在成功保存輪替授權後重新啟動
+- **THEN** 新 client 使用資料庫中最新版加密 storage state
+- **THEN** 系統不依賴已刪除的臨時檔或程序記憶體恢復登入
+
+### Requirement: 正確分類課程帳號授權失效
+系統 MUST 將明確的 NotebookLM 認證失效與暫時性上游錯誤分開處理，避免真正過期被誤標為一般錯誤，也避免短暫網路問題要求管理者重新登入。
+
+#### Scenario: 套件回報明確認證失效
+- **WHEN** `notebooklm-py` 回報 `Authentication expired or invalid`、HTTP 401 或等價的登入失效訊號
+- **THEN** 系統將課程帳號標記為 `expired`，並保存遮蔽後錯誤碼 `course_auth_expired`
+- **THEN** 管理後台顯示重新驗證操作，學員端不得看到原始例外或授權內容
+
+#### Scenario: 發生暫時性連線或服務錯誤
+- **WHEN** NotebookLM 操作遇到逾時、限流或暫時性 5xx 錯誤，且沒有明確認證失效訊號
+- **THEN** 系統將事件分類為暫時性 `error`，不得將課程帳號標記為 `expired`
+- **THEN** 系統不得覆蓋目前加密授權或要求管理者立即重新登入
+
 ### Requirement: 管理員安全重新驗證
 系統 SHALL 提供僅管理員可用的重新驗證流程，成功後原子替換課程帳號授權並立即執行健康檢查。
 

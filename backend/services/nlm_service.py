@@ -572,7 +572,9 @@ async def _test_and_bind_notebook(
         await channel_binding_repository.finish_check(checking, status=failure_status)
         raise
 
-    if not await course_account_service.mark_query_success(account_record):
+    if not await course_account_service.mark_query_success(
+        account_record, auth_payload
+    ):
         await channel_binding_repository.finish_check(
             checking, status="course_account_unavailable"
         )
@@ -655,7 +657,9 @@ async def _recheck_notebook_binding(
 
     # A successful check also refreshes the title atomically without changing
     # the notebook id.  This is safe for renamed notebooks.
-    if not await course_account_service.mark_query_success(account_record):
+    if not await course_account_service.mark_query_success(
+        account_record, auth_payload
+    ):
         await channel_binding_repository.finish_check(checking, status=binding.status)
         raise NotebookServiceError(
             "course_account_changed",
@@ -740,7 +744,9 @@ async def ask_question(channel_id: str, user_id: str, question: str) -> list[str
     finally:
         notebook_lock.release()
 
-    if not await course_account_service.mark_query_success(account_record):
+    if not await course_account_service.mark_query_success(
+        account_record, auth_payload
+    ):
         return ["⚠️ 課程帳號剛剛已更新，請重新送出問題。"]
     _, still_current = await channel_binding_repository.update_status_if_current(
         binding, "bound"

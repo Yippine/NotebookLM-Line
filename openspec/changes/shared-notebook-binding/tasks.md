@@ -5,7 +5,7 @@
 - [ ] 1.3 使用目前候選 `notebooklm-py` 版本對兩本 Viewer shared Notebook 執行 `notebooks.get`、`chat.ask` 與引用來源測試
 - [ ] 1.4 驗證取消分享、刪除 Notebook、課程帳號登出、限流及暫時性上游錯誤的實際錯誤型別
 - [ ] 1.5 測量 shared Notebook 回答延遲、同時查詢表現及用量歸屬，決定初始並發上限與逾時值
-- [ ] 1.6 比較持久化 profile 與 durable master token 在部署環境的安全性和可維運性，記錄第一版採用方式
+- [x] 1.6 決定第一版採「加密資料庫 storage state＋短效臨時檔＋revision/CAS 寫回」，durable master token 延後至獨立安全評估
 - [ ] 1.7 將 PoC 通過的 `notebooklm-py` 精確版本鎖定於後端相依檔，並建立升級檢查說明
 
 ## 2. 資料模型與設定基礎
@@ -37,7 +37,11 @@
 - [x] 4.5 實作管理員課程帳號設定、狀態查詢、按需健康檢查及安全重新驗證 API
 - [x] 4.6 為課程帳號查詢加入不含問題內容與秘密值的成功率、延遲、限流及錯誤分類指標
 - [x] 4.7 實作授權失效時的管理員狀態與學員通用錯誤，確認不會將課程帳號授權內容傳回前端
-- [ ] 4.8 將 `notebooklm-py` 的 `Authentication expired or invalid` 類型穩定分類為課程帳號授權失效，避免誤顯示一般上游錯誤
+- [x] 4.8 將 `notebooklm-py` 的 `Authentication expired or invalid`、HTTP 401 與等價訊號穩定分類為 `course_auth_expired`，並將逾時、限流及 5xx 保持為暫時性錯誤
+- [x] 4.9 在每次 NotebookLM client 結束前讀回更新後的 storage state，驗證必要 Cookie，並以原始 `auth_revision` 進行加密 CAS 寫回
+- [x] 4.10 讓一般查詢與每 15 分鐘健康檢查都能保存 Cookie 輪替，確保短效臨時檔只在受控範圍存在且結束後必定刪除
+- [x] 4.11 新增無變更不寫入、並行 revision 衝突、寫回失敗、重新驗證競爭及容器重啟後沿用最新版授權的測試
+- [x] 4.12 新增不含 Cookie／storage state 的 `auth_persistence_failed` 健康狀態、指標與告警，且回答成功時不因單純寫回失敗而遺失回答
 
 ## 5. 共享 Notebook 綁定後端
 
@@ -81,6 +85,7 @@
 - [x] 8.6 執行慢速與並發測試，確認 Webhook 快速回傳、Loading 動畫及背景 Push 不依賴過期 Reply Token
 - [x] 8.7 更新 README、部署環境變數、管理員操作手冊、學員圖文指引、隱私告知、故障排除與版本升級清單
 - [x] 8.8 執行完整測試、前端建置、OpenSpec 驗證與正式部署前安全檢查，記錄驗收結果
+- [ ] 8.9 使用真實課程 Gmail 連續至少 48 小時驗證閒置健康刷新、實際問答、容器重啟及授權 revision 持續更新，確認不需人工重新貼授權 JSON
 
 ## 9. 管理後台學員生命週期
 

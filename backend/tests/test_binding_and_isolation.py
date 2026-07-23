@@ -425,7 +425,7 @@ async def test_course_account_swap_during_probe_cannot_create_stale_binding(
     async def run(*_args, **_kwargs):
         return "New title from old account"
 
-    async def stale_account(_record):
+    async def stale_account(_record, _auth_payload=None):
         return False
 
     monkeypatch.setattr(

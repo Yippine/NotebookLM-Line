@@ -63,7 +63,13 @@
 
 新增單例 `course_notebook_account` 資料，保存課程帳號 email、加密授權資料、健康狀態、最後檢查時間與非敏感錯誤碼。授權資料使用固定的 Fernet 金鑰加密；正式環境未設定金鑰時應拒絕啟動，而不是產生臨時金鑰。
 
-第一版以 `notebooklm-py` 的持久化 profile／storage state 為基礎；在 PoC 證實部署環境適用後，可使用該套件的 durable master token 自動重建短期 Cookie。Master token 屬完整帳號長期憑證，必須只用於專用 Gmail、加密保存且不得透過學員 API 回傳。
+第一版明確採用經加密的 `storage_state` 作為授權來源，不採用 durable master token。`course_notebook_account.auth_encrypted` 是唯一真實來源；伺服器每次建立 NotebookLM client 時，讀取當下 `auth_revision`，解密至權限為 `0600` 的短效臨時檔。操作結束後必須在刪除臨時檔前重新讀取其內容，驗證 JSON 結構與必要 Cookie，若內容有實質變更，便重新加密並以 `WHERE auth_revision = <原版本>` 的比較並交換方式寫回，再遞增 revision。
+
+一般查詢與每 15 分鐘執行的健康檢查都必須保存 `notebooklm-py` 產生的 Cookie 輪替，使帳號即使沒有學員提問仍可持續刷新。臨時檔不屬於持久授權儲存，無論成功或失敗都必須刪除；Cookie、完整 storage state 與解密內容不得寫入 log、錯誤回應或監控標籤。
+
+若並行操作期間已有較新的 revision，舊 client 的候選授權不得覆蓋較新資料；系統捨棄舊候選值，下一次操作重新載入最新版。單純發生 revision 衝突時，不得為了寫回而重送已完成的 NotebookLM 問答。若回答已成功但授權寫回失敗，仍可交付該次回答，但必須記錄不含秘密值的 `auth_persistence_failed`、更新管理健康狀態並告警；健康檢查本身的寫回失敗則視為檢查失敗。
+
+管理者重新驗證仍採「先驗證、後原子替換」：新授權通過實際 NotebookLM 探測後才遞增 revision 並取代舊資料。Durable master token 因權限更高且尚未完成安全及部署驗證，延後至獨立變更評估，不作為第一版失效補救方式。
 
 NotebookLM 查詢服務直接讀取集中授權，不再以每個 Channel 的資料覆寫程序環境變數。每個請求建立受控的 client context，並使用可設定的 semaphore 限制同時查詢數，避免超出帳號配額或造成服務不穩。
 
@@ -154,11 +160,12 @@ V2 第一版的 SQLite outbox 與 Notebook 對話鎖以單一 backend process／
 
 - **[NotebookLM 使用非官方 API，可能無預警改版]** → 鎖定版本、建立 smoke test、提供健康告警與可回滾部署。
 - **[課程帳號成為單點故障]** → 定期健康檢查、管理員重新驗證、清楚的全站服務狀態與備份還原程序。
+- **[Cookie 已由上游輪替，但新狀態未成功保存]** → 一般查詢與健康檢查皆在刪除臨時檔前驗證並加密寫回；以 revision/CAS 防止舊狀態覆蓋新狀態，寫回失敗時產生安全告警。
 - **[所有查詢可能集中計入課程帳號配額]** → 設定同時查詢上限、記錄非敏感用量指標、在擴班前實測容量；多帳號分流不納入第一版。
 - **[Viewer shared Notebook 回答較慢]** → 沿用 Loading 動畫、背景任務與 Push Message，不等待 Reply Token。
 - **[課程帳號能讀取學員分享的來源]** → 設定頁明確告知資料可見性、只要求 Viewer、提供解除綁定與取消分享說明。
 - **[學員可能綁定其他已分享 Notebook 的網址]** → 第一版依賴高熵 URL 與設定權杖；若威脅模型提高，再加入暫時修改 Notebook 標題或擁有者 email 比對的所有權挑戰。
-- **[Master token 是高權限長期憑證]** → 只使用專用帳號、加密保存、限制管理員存取；PoC 不通過則退回可人工更新的持久化 profile。
+- **[Master token 是高權限長期憑證]** → 第一版不採用；若未來另行評估，必須使用專用帳號、加密保存、限制管理員存取並完成獨立安全審查。
 - **[集中帳號查詢的對話可能互相影響]** → 每次新提問使用獨立或明確的 conversation context，不依賴帳號的最後一次對話；至少以 Channel 與 LINE user ID 隔離對話識別。
 - **[既有學員重新綁定造成中斷]** → 使用功能旗標與過渡期，先讓既有 Channel 分享 Notebook 並驗證，再停用舊 Cookie 路徑。
 
@@ -166,19 +173,20 @@ V2 第一版的 SQLite outbox 與 Notebook 對話鎖以單一 backend process／
 
 1. 建立一個課程專用一般 Gmail，完成 NotebookLM 首次使用與復原／兩步驟驗證設定。
 2. 以兩個測試學員帳號執行 PoC：分享不同 Notebook、以 Viewer 問答、撤銷分享、並發查詢及慢速回覆。
-3. 鎖定通過 PoC 的 `notebooklm-py` 版本，新增集中授權、健康檢查與安全設定工作階段資料表。
-4. 在功能旗標後新增 URL 綁定 API 與新版設定頁；舊 JSON 端點停止出現在學員 UI，但暫時保留為管理員限定的回滾工具。
-5. 通知既有學員將 Notebook 分享給課程帳號並貼上網址；成功後保留 Notebook ID、清除該 Channel 的舊授權資料。
-6. 所有既有 Channel 完成遷移或過渡期結束後，停用並移除公開 JSON／本機綁定端點。
-7. 加密遷移既有 LINE Secret 與 Access Token，確認 Webhook 正常後再清除明文欄位或重建資料表。
-8. 啟用 CORS allowlist、Bearer token、速率限制、健康告警及遮蔽紀錄，完成端到端回歸測試後全面切換。
-9. 啟用管理者學員勾選、姓名編輯及個別到期時間；先驗證不同日期共存、後加入學員無期限、選取取消期限及到期隔離清理。
+3. 鎖定通過 PoC 的 `notebooklm-py` 版本，新增集中授權、授權 revision、健康檢查與安全設定工作階段資料表。
+4. 實作短效 storage-state 臨時檔的 Cookie 輪替讀回、驗證、加密及 revision/CAS 寫回；以一般查詢、15 分鐘健康刷新、並行操作與容器重啟驗證授權可持續使用。
+5. 在功能旗標後新增 URL 綁定 API 與新版設定頁；舊 JSON 端點停止出現在學員 UI，但暫時保留為管理員限定的回滾工具。
+6. 通知既有學員將 Notebook 分享給課程帳號並貼上網址；成功後保留 Notebook ID、清除該 Channel 的舊授權資料。
+7. 所有既有 Channel 完成遷移或過渡期結束後，停用並移除公開 JSON／本機綁定端點。
+8. 加密遷移既有 LINE Secret 與 Access Token，確認 Webhook 正常後再清除明文欄位或重建資料表。
+9. 啟用 CORS allowlist、Bearer token、速率限制、健康告警及遮蔽紀錄，完成端到端回歸測試後全面切換。
+10. 啟用管理者學員勾選、姓名編輯及個別到期時間；先驗證不同日期共存、後加入學員無期限、選取取消期限及到期隔離清理。
 
 回滾時關閉新功能旗標、恢復前一版應用程式並還原遷移前資料庫備份。過渡期內只有尚未清除舊授權的 Channel 可回到舊流程；已清除的學員 Cookie 不得從其他來源重新收集，應要求重新分享或由管理者處理。
 
 ## Open Questions（待 PoC 確認）
 
-- 部署環境最適合使用持久化 profile 還是 durable master token；決策以安全性、持久磁碟與重新驗證操作結果為準。
+- 已決定第一版使用「加密資料庫 `storage_state`＋短效臨時檔＋revision/CAS 寫回」；durable master token 不在本變更範圍。
 - Viewer shared Notebook 的平均與最長聊天延遲、同時查詢上限及實際配額歸屬。
 - 課程帳號是否必須手動開啟分享邀請，或可直接以精確 Notebook ID 存取。
 - 目前及重新品牌後的官方 Notebook URL host／path 格式，應納入 allowlist 的精確範圍。

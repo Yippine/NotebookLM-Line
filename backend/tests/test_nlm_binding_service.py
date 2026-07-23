@@ -27,7 +27,7 @@ class FakeCourseAccountService:
         self.failures.append(error.code)
         return True
 
-    async def mark_query_success(self, _record):
+    async def mark_query_success(self, _record, _auth_payload=None):
         return True
 
 
