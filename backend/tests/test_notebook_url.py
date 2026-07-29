@@ -5,7 +5,11 @@ import pytest
 from services.notebook_url import NotebookUrlError, parse_notebook_url
 
 
-ALLOWED = ["notebooklm.google.com", "https://notebooklm.google"]
+ALLOWED = [
+    "notebooklm.google.com",
+    "https://notebooklm.google",
+    "notebook.google.com",
+]
 NOTEBOOK_ID = "AbcdEFGH_1234-xyz"
 
 
@@ -13,6 +17,7 @@ NOTEBOOK_ID = "AbcdEFGH_1234-xyz"
     ("url", "expected"),
     [
         (f"https://notebooklm.google.com/notebook/{NOTEBOOK_ID}", NOTEBOOK_ID),
+        (f"https://notebook.google.com/notebook/{NOTEBOOK_ID}", NOTEBOOK_ID),
         (
             f"https://notebooklm.google.com/notebook/{NOTEBOOK_ID}/edit?tab=sources#top",
             NOTEBOOK_ID,
@@ -31,6 +36,7 @@ def test_parse_notebook_url_accepts_only_normalized_official_urls(
     [
         f"http://notebooklm.google.com/notebook/{NOTEBOOK_ID}",
         f"https://notebooklm.google.com.evil.example/notebook/{NOTEBOOK_ID}",
+        f"https://notebook.google.com.evil.example/notebook/{NOTEBOOK_ID}",
         f"https://evil.example/notebook/{NOTEBOOK_ID}",
         f"https://user:password@notebooklm.google.com/notebook/{NOTEBOOK_ID}",
         f"https://notebooklm.google.com:8443/notebook/{NOTEBOOK_ID}",

@@ -8,6 +8,7 @@
 - 課程帳號授權採可持久續期的 `storage_state`；每次 NotebookLM 操作或健康檢查產生的 Cookie 輪替，必須驗證後以加密資料與 revision/CAS 寫回，不能隨臨時檔刪除。
 - 學員將自己建立的 NotebookLM 私下分享給指定課程帳號，權限設為檢視者。
 - 學員在設定頁貼上自己的 NotebookLM 網址；系統擷取 Notebook ID、驗證課程帳號的存取權，並執行最小聊天測試。
+- 綁定頁同時接受 Google 分享頁目前產生的 `notebook.google.com/notebook/<id>`，以及既有 `notebooklm.google.com`／`notebooklm.google` 官方網址，學員不需手動改寫網域。
 - 系統保存 `LINE Channel ID → Notebook ID` 對應，不再保存每位學員的 Google Cookie。
 - LINE 回答移除無法在聊天室操作的 NotebookLM 數字引用與無連結來源檔名，不另外傳送「參考來源」訊息。
 - 長時間查詢使用 LINE Loading Animation 顯示進度，最長 60 秒並在回答尚未完成時定期續期；只有動畫 API 失敗才傳送文字等待提示。

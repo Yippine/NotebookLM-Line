@@ -77,7 +77,7 @@ NotebookLM 查詢服務直接讀取集中授權，不再以每個 Channel 的資
 
 新增綁定 API，輸入包含 Notebook URL。後端必須：
 
-1. 只接受 HTTPS 與設定的官方 NotebookLM host allowlist。
+1. 只接受 HTTPS 與設定的官方 Notebook host allowlist；精確允許 `notebook.google.com`、`notebooklm.google.com` 與 `notebooklm.google`，不使用子網域或字尾比對。
 2. 從網址正規化並擷取 Notebook ID。
 3. 使用課程帳號呼叫 `notebooks.get(notebook_id)` 驗證讀取權。
 4. 在學員明確按下「測試並綁定」時送出固定、最小的聊天測試，以確認 Viewer Notebook 可回答；畫面需告知此動作會產生一次測試查詢。
@@ -189,4 +189,4 @@ V2 第一版的 SQLite outbox 與 Notebook 對話鎖以單一 backend process／
 - 已決定第一版使用「加密資料庫 `storage_state`＋短效臨時檔＋revision/CAS 寫回」；durable master token 不在本變更範圍。
 - Viewer shared Notebook 的平均與最長聊天延遲、同時查詢上限及實際配額歸屬。
 - 課程帳號是否必須手動開啟分享邀請，或可直接以精確 Notebook ID 存取。
-- 目前及重新品牌後的官方 Notebook URL host／path 格式，應納入 allowlist 的精確範圍。
+- 已確認 Google 分享頁會產生 `https://notebook.google.com/notebook/<id>`，且可導向既有 NotebookLM 服務；此 host 與既有 `notebooklm.google.com`、`notebooklm.google` 均以精確比對納入 allowlist。

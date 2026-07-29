@@ -123,7 +123,11 @@ function isBindingStatus(value: string | undefined): value is NotebookBindingSta
 function validateNotebookUrl(value: string): string | null {
   try {
     const parsed = new URL(value.trim());
-    const allowedHosts = new Set(["notebooklm.google.com", "notebooklm.google"]);
+    const allowedHosts = new Set([
+      "notebooklm.google.com",
+      "notebooklm.google",
+      "notebook.google.com",
+    ]);
     if (parsed.protocol !== "https:" || !allowedHosts.has(parsed.hostname.toLowerCase())) {
       return "請貼上 NotebookLM 官方 HTTPS 網址。";
     }
@@ -480,7 +484,7 @@ export default function SetupPage() {
                   className="input-tactile"
                   value={notebookUrl}
                   onChange={(event) => setNotebookUrl(event.target.value)}
-                  placeholder="https://notebooklm.google.com/notebook/..."
+                  placeholder="https://notebook.google.com/notebook/..."
                   required
                   autoComplete="off"
                   disabled={busy !== null}

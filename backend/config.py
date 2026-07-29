@@ -28,7 +28,9 @@ class Settings(BaseSettings):
         "http://localhost:5173,http://127.0.0.1:5173,"
         "https://ai-notebook-v2.leopilot.com"
     )
-    notebook_host_allowlist: str = "notebooklm.google.com,notebooklm.google"
+    notebook_host_allowlist: str = (
+        "notebooklm.google.com,notebooklm.google,notebook.google.com"
+    )
 
     setup_session_ttl_seconds: int = 3600
     admin_session_ttl_seconds: int = 900

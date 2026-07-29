@@ -1,4 +1,8 @@
-## ADDED Requirements
+## Purpose
+
+定義學員免安裝分享 Notebook、提交官方網址、驗證存取、建立隔離映射及透過 LINE 使用回答的完整行為。
+
+## Requirements
 
 ### Requirement: 顯示免安裝分享指引
 系統 SHALL 在 NotebookLM 綁定步驟顯示課程專用 Gmail、Viewer 權限要求、資料可見性說明及學員應貼上自己 Notebook 網址的明確指引，且不得要求學員安裝工具或提供 Google Cookie。

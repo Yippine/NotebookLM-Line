@@ -93,6 +93,27 @@ describe("shared Notebook setup page", () => {
     expect(bindNotebook).not.toHaveBeenCalled();
   });
 
+  it("accepts the current notebook.google.com sharing URL", async () => {
+    const user = userEvent.setup();
+    const sharedUrl =
+      "https://notebook.google.com/notebook/d04f56e8-75e0-4381-b6e4-107e6c48ee4c";
+    vi.mocked(bindNotebook).mockResolvedValue({
+      status: "bound",
+      notebook_id: "d04f56e8-75e0-4381-b6e4-107e6c48ee4c",
+      notebook_title: "Shared Notebook",
+      last_access_checked_at: "2030-01-01T00:00:00Z",
+    });
+    renderSetup();
+
+    await user.type(await screen.findByLabelText("你的 NotebookLM 網址"), sharedUrl);
+    await user.click(screen.getByRole("button", { name: "測試並綁定" }));
+
+    await waitFor(() => {
+      expect(bindNotebook).toHaveBeenCalledWith("setup-session", "channel-a", sharedUrl);
+    });
+    expect(await screen.findByText("設定完成！")).toBeInTheDocument();
+  });
+
   it("requires a legacy unbound Notebook ID to use the full URL probe", async () => {
     vi.mocked(getChannel).mockResolvedValue({
       ...channel,
