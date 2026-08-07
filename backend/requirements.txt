@@ -6,7 +6,7 @@ python-dotenv
 python-multipart
 cryptography
 httpx
-notebooklm-py
+notebooklm-py>=0.8.0
 markitdown
 google-api-python-client
 google-auth
