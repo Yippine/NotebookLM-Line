@@ -1,22 +1,22 @@
-"""Keep a cloudflared quick tunnel alive and self-healing.
+"""讓 cloudflared 的 quick tunnel 保持存活並能自我修復。
 
-Free quick tunnels (``cloudflared tunnel --url ...``) have no uptime
-guarantee: Cloudflare can silently drop the DNS registration while the
-local process keeps running with no error, or the tunnel can simply exit.
-This watchdog:
+免費的 quick tunnel（``cloudflared tunnel --url ...``）沒有任何
+上線時間保證：Cloudflare 可能會在本機行程仍在正常執行、
+沒有任何錯誤的情況下，悄悄地把 DNS 註冊給撤掉，或者 tunnel
+本身也可能直接結束。這個看門狗程式會：
 
-  1. Starts (or restarts) a quick tunnel pointing at localhost:8083.
-  2. Periodically health-checks the assigned hostname.
-  3. Whenever the hostname changes (first start, or after a silent-death
-     restart), automatically:
-       a. Updates backend/.env's WEBHOOK_BASE_URL
-       b. Recreates the backend container (`docker compose up -d`) so it
-          picks up the new value
-       c. Pushes the new webhook URL to LINE for every bound channel via
-          the Messaging API (PUT /v2/bot/channel/webhook/endpoint) — no
-          manual paste into LINE Developers Console needed.
+  1. 啟動（或重啟）一個指向 localhost:8083 的 quick tunnel。
+  2. 定期對被分配到的主機名稱做健康檢查。
+  3. 每當主機名稱發生變化時（第一次啟動，或是在一次無聲死亡
+     後重啟），自動執行以下動作：
+       a. 更新 backend/.env 中的 WEBHOOK_BASE_URL
+       b. 重新建立後端容器（`docker compose up -d`），讓它套用
+          新的設定值
+       c. 透過 Messaging API（PUT /v2/bot/channel/webhook/endpoint）
+          將新的 webhook URL 推送給每一個已綁定的 channel——
+          不需要手動貼到 LINE Developers Console。
 
-Run this once in a terminal and leave it running:
+在終端機中執行一次，讓它持續在背景執行即可：
     python scripts/tunnel_watchdog.py
 """
 
@@ -39,11 +39,11 @@ CHECK_INTERVAL_SECONDS = 60
 HOSTNAME_TIMEOUT_SECONDS = 20
 LINE_ENDPOINT_API = "https://api.line.me/v2/bot/channel/webhook/endpoint"
 
-# Real quick-tunnel hostnames are always several hyphen-separated random
-# words (e.g. "reward-clearance-answer-authorities.trycloudflare.com").
-# cloudflared's non-TTY (piped) output can also print a bare placeholder
-# like "api.trycloudflare.com" before the real one is assigned — require at
-# least 3 segments so that decoy never matches.
+# 真正的 quick-tunnel 主機名稱永遠是好幾個以連字號分隔的隨機單字
+# （例如 "reward-clearance-answer-authorities.trycloudflare.com"）。
+# cloudflared 在非 TTY（被 pipe）的輸出中，在真正的主機名稱被
+# 分配之前，也可能先印出一個像 "api.trycloudflare.com" 這樣的
+# 陽春佔位主機名稱——要求至少 3 個區段，讓這個誘餌永遠不會比對成功。
 _HOSTNAME_RE = re.compile(r"https://([a-z0-9]+(?:-[a-z0-9]+){2,}\.trycloudflare\.com)")
 
 
@@ -52,13 +52,13 @@ def log(msg: str) -> None:
 
 
 def _drain(stream) -> None:
-    """Keep reading a subprocess's stdout so its pipe buffer never fills up."""
+    """持續讀取子行程的 stdout，避免它的 pipe 緩衝區被填滿。"""
     for _ in stream:
         pass
 
 
 def start_tunnel() -> tuple[subprocess.Popen, str]:
-    """Launch cloudflared and block until it reports its assigned hostname."""
+    """啟動 cloudflared，並阻塞直到它回報被分配到的主機名稱為止。"""
     proc = subprocess.Popen(
         ["cloudflared", "tunnel", "--url", f"http://localhost:{LOCAL_PORT}"],
         stdout=subprocess.PIPE,
@@ -86,19 +86,20 @@ def start_tunnel() -> tuple[subprocess.Popen, str]:
     return proc, hostname
 
 
-# Cloudflare edge error codes meaning "reached Cloudflare fine, but it
-# can't reach the local tunnel/origin" — a dead tunnel, not a dead app.
+# 這些是 Cloudflare 邊緣節點的錯誤碼，代表「有成功連上
+# Cloudflare，但它連不到本機的 tunnel/origin」——這是 tunnel
+# 死掉了，不是應用程式本身壞掉。
 # https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/
 _TUNNEL_DEAD_HTTP_CODES = {502, 521, 522, 523, 524, 530}
 
 
 def is_dns_alive(hostname: str) -> bool:
-    """True only if the tunnel is actually forwarding to the local app.
+    """只有在 tunnel 確實有將流量轉發到本機應用程式時才回傳 True。
 
-    A plain HTTP error from *our own app* (e.g. 403 from a bad signature)
-    means the tunnel is fine. A Cloudflare edge error (e.g. 530) means the
-    tunnel registration exists but isn't actually connected to anything —
-    that's a dead tunnel wearing a live hostname.
+    來自*我們自己應用程式*的一般 HTTP 錯誤（例如簽章錯誤導致的
+    403）代表 tunnel 本身是正常的。而 Cloudflare 邊緣錯誤
+    （例如 530）代表 tunnel 的註冊確實存在，但實際上沒有連到
+    任何東西——這是一個披著存活主機名稱外皮的死掉 tunnel。
     """
     try:
         urllib.request.urlopen(f"https://{hostname}/", timeout=10)
@@ -117,6 +118,50 @@ def update_env_webhook_url(new_url: str) -> None:
     text = ENV_PATH.read_text(encoding="utf-8")
     new_text = re.sub(r"(?m)^WEBHOOK_BASE_URL=.*$", f"WEBHOOK_BASE_URL={new_url}", text)
     ENV_PATH.write_text(new_text, encoding="utf-8")
+
+
+def _read_env_var(name: str) -> str:
+    """最陽春的 .env 行讀取器——這個腳本只在乎一兩個值，
+    不需要為此引入 python-dotenv 依賴。"""
+    if not ENV_PATH.exists():
+        return ""
+    match = re.search(rf"(?m)^{name}=(.*)$", ENV_PATH.read_text(encoding="utf-8"))
+    return match.group(1).strip() if match else ""
+
+
+def send_admin_alert(message: str) -> None:
+    """盡力而為地推送 LINE 訊息給管理員，讓即使沒有人正在盯著這個
+    終端機，tunnel 死掉這件事也會被知道。若管理員告警未設定
+    （ADMIN_LINE_USER_ID / ADMIN_ALERT_ACCESS_TOKEN 未設定），
+    則不做任何事。
+
+    這裡只涵蓋「tunnel 死掉、而看門狗程式本身還活著能發現它」
+    的情況——如果看門狗行程本身被砍掉（例如機器進入睡眠，或
+    執行它的終端機被關閉），這裡的機制完全不會被觸發。那種
+    失效模式需要作業系統層級的行程監控（例如設定成失敗時自動
+    重啟的 Windows 排程工作），而不是應用程式層級的告警。
+    """
+    admin_user_id = _read_env_var("ADMIN_LINE_USER_ID")
+    access_token = _read_env_var("ADMIN_ALERT_ACCESS_TOKEN")
+    if not admin_user_id or not access_token:
+        return
+
+    body = json.dumps(
+        {"to": admin_user_id, "messages": [{"type": "text", "text": message}]}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.line.me/v2/bot/message/push",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        log(f"failed to send admin alert: {e}")
 
 
 def restart_backend() -> None:
@@ -157,9 +202,9 @@ def sync_line_webhook_urls(new_base_url: str) -> None:
 
 
 def wait_until_reachable(hostname: str, tries: int = 8, delay: float = 4.0) -> bool:
-    """Quick tunnels can take a few seconds to become reachable after
-    creation. Retry before treating a freshly-started tunnel as bad —
-    never touch .env/backend/LINE off a single failed check."""
+    """Quick tunnel 建立後可能需要幾秒鐘才能連得上。在把一個
+    剛啟動的 tunnel 判定為壞掉之前先重試幾次——絕不能只憑
+    單一次失敗的檢查，就去動 .env/backend/LINE。"""
     for attempt in range(1, tries + 1):
         if is_dns_alive(hostname):
             return True
@@ -169,14 +214,14 @@ def wait_until_reachable(hostname: str, tries: int = 8, delay: float = 4.0) -> b
 
 
 def start_healthy_tunnel(max_attempts: int = 5) -> tuple[subprocess.Popen, str]:
-    """Start a tunnel and confirm it's actually reachable before returning it.
+    """啟動一個 tunnel，並在回傳它之前先確認它真的連得上。
 
-    Some quick-tunnel registrations never become reachable at all (DNS
-    "Non-existent domain" even after the full grace period) — that's a bad
-    tunnel, not a slow one. Discard it and request a brand new one rather
-    than getting stuck waiting on a registration that will never resolve.
-    cloudflared itself occasionally fails to even report a hostname in
-    time — that counts as a failed attempt too, not a fatal error.
+    有些 quick-tunnel 註冊完全不會變得可連線（即使過了完整的
+    寬限期，DNS 仍是「網域不存在」）——這是一個壞掉的 tunnel，
+    而不是慢的 tunnel。應該直接丟棄它並要求一個全新的，而不是
+    卡在等待一個永遠不會解析成功的註冊上。cloudflared 本身偶爾
+    也會連主機名稱都來不及回報——這也算是一次失敗的嘗試，
+    而不是一個致命錯誤。
     """
     for attempt in range(1, max_attempts + 1):
         try:
@@ -193,14 +238,14 @@ def start_healthy_tunnel(max_attempts: int = 5) -> tuple[subprocess.Popen, str]:
 
 
 def _retry_forever(description: str, fn, backoff_seconds: float = 30.0):
-    """Keep calling ``fn`` until it succeeds, logging and backing off between
-    failures instead of propagating.
+    """持續呼叫 ``fn`` 直到成功為止，失敗時記錄並延遲重試，
+    而不是往外拋出例外。
 
-    A watchdog that can be killed by its own transient failure (a bad
-    cloudflared start, a hiccup in ``docker compose up``, a flaky LINE API
-    call) isn't actually watching anything once it's dead — every recovery
-    step needs to survive being retried indefinitely rather than crash the
-    process and silently leave the webhook down until a human notices.
+    一個會被自己的暫時性失敗（cloudflared 啟動失敗、
+    ``docker compose up`` 出點小狀況、LINE API 不穩定）搞死的
+    看門狗程式，一旦死掉就等於什麼都沒在看守了——每一個復原
+    步驟都必須能夠承受無限次重試，而不是讓行程崩潰、
+    悄悄地讓 webhook 一直處於失效狀態，直到有人發現為止。
     """
     while True:
         try:
@@ -233,6 +278,9 @@ def main() -> None:
                 proc, hostname = _retry_forever("establishing a healthy tunnel", start_healthy_tunnel)
                 log(f"tunnel back up: https://{hostname}")
                 _retry_forever("applying new tunnel hostname", lambda: apply_new_hostname(hostname))
+                send_admin_alert(
+                    f"[watchdog] tunnel 曾經掛掉，已自動恢復為新網址：https://{hostname}"
+                )
     except KeyboardInterrupt:
         log("stopping, killing tunnel process")
         proc.kill()
