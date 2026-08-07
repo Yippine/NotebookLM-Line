@@ -10,6 +10,7 @@ import aiosqlite
 from config import settings
 from database import DB
 from services import google_log_service
+from services.alert_service import notify_admin
 from services.nlm_service import ask_question, update_knowledge_base
 from services.line_service import (
     show_loading,
@@ -24,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
-# The bot's display name in LINE (set separately in the LINE Official
-# Account Manager — this constant only controls what @-mention text this
-# code recognizes, it doesn't rename the account itself).
+# 機器人在 LINE 上的顯示名稱（實際名稱是在 LINE Official
+# Account Manager 另外設定的——這個常數只控制本程式碼會
+# 辨識哪些 @-mention 文字，並不會改動帳號本身的名稱）。
 BOT_NAME = "小選"
 _TEXT_MENTION_TRIGGERS = (f"@{BOT_NAME}", "@機器人")
 
@@ -39,11 +40,11 @@ def verify_signature(body: bytes, signature: str, channel_secret: str) -> bool:
 
 
 def _self_mentions(message: dict) -> list[dict]:
-    """Return the list of @mentions in this message that point at this bot account.
+    """回傳此訊息中所有指向本機器人帳號的 @mention 清單。
 
-    Some LINE desktop clients do not populate ``isSelf`` reliably for mentions,
-    so we fall back to treating any mention payload as a valid mention when the
-    message is from a group/room chat.
+    部分 LINE 桌面版用戶端在提及（mention）中並不會可靠地填入 ``isSelf``，
+    所以當訊息來自群組/聊天室時，我們退而將任何 mention payload
+    都視為有效的提及。
     """
     mentionees = message.get("mention", {}).get("mentionees", [])
     if not mentionees:
@@ -57,44 +58,88 @@ def _self_mentions(message: dict) -> list[dict]:
 
 
 def _has_text_mention(text: str) -> bool:
-    """Check if text explicitly @-mentions this bot by name — "@小選" or the
-    generic "@機器人" — rather than matching any bare "@" character. Fallback
-    path for desktop LINE clients that don't populate the structured
-    mention payload reliably."""
+    """檢查文字中是否明確以名稱 @-mention 了這個機器人——「@小選」或
+    通用的「@機器人」——而不是比對任何單獨的 "@" 字元。這是給那些
+    無法可靠填入結構化 mention payload 的桌面版 LINE 用戶端的
+    備援路徑。"""
     return any(trigger in text for trigger in _TEXT_MENTION_TRIGGERS)
 
 
 def _strip_text_mention_trigger(text: str) -> str:
-    """Remove a matched text-mention trigger (see _has_text_mention) from
-    the message. Used when there's no structured mention payload to strip
-    via index/length instead — otherwise the literal "@小選"/"@機器人" text
-    would leak into the question sent to NotebookLM."""
+    """從訊息中移除已比對到的文字提及觸發詞（見 _has_text_mention）。
+    用於沒有結構化 mention payload 可依 index/length 移除的情況——
+    否則字面上的「@小選」／「@機器人」文字就會外洩進送給
+    NotebookLM 的問題內容中。"""
     for trigger in _TEXT_MENTION_TRIGGERS:
         text = text.replace(trigger, "")
     return text.strip()
+
+
+_CAR_RELATED_KEYWORDS = (
+    "車", "汽車", "車輛", "車子", "車款", "車型", "廠牌", "品牌",
+    # 機械／性能
+    "引擎", "馬力", "扭力", "排氣量", "油耗", "續航", "充電", "電動車", "油電", "混合動力",
+    "變速箱", "手排", "自排", "四驅", "底盤", "懸吊", "煞車", "輪胎",
+    # 車型配置／規格／外觀
+    "配備", "規格", "內裝", "外觀", "車色", "顏色", "空間", "座椅", "後座", "行李廂",
+    "天窗", "大燈", "音響", "螢幕", "安全性", "安全配備", "氣囊", "駕駛輔助",
+    # 車體類型
+    "房車", "休旅車", "SUV", "掀背", "敞篷", "跑車", "轎車", "貨車", "商用車",
+    # 持有／維修保養
+    "試乘", "展示中心", "展示間", "現車", "現貨", "交車", "車主", "保養", "保固",
+    "維修", "保修", "換油", "里程", "驗車", "回收", "中古車", "二手車",
+    # 配置／等級用語（往往是訊息中唯一與車相關的線索，
+    # 訊息本身可能只提到車型名稱，例如「X-Trail2019入門型」）
+    "入門型", "入門版", "豪華型", "豪華版", "旗艦", "頂規", "尊爵", "精裝",
+    "智能版", "經典版", "舒適版", "進化版", "運動版", "頂級", "標準型",
+    # 「哪家經銷商／品牌有賣這個」的常見說法
+    "誰家有", "哪家有", "哪裡有", "哪裡買得到",
+    # 品牌名稱——英文／原文拼寫，使用者常見輸入方式
+    "Toyota", "Lexus", "Honda", "Nissan", "Mazda", "Mitsubishi", "Suzuki",
+    "Subaru", "Ford", "Hyundai", "Kia", "Volkswagen", "Audi", "BMW",
+    "Benz", "Mercedes", "Volvo", "Peugeot", "Skoda", "Tesla", "Luxgen",
+    # 品牌名稱——中文音譯
+    "豐田", "雷克薩斯", "本田", "日產", "馬自達", "三菱", "鈴木", "速霸陸",
+    "福特", "現代", "起亞", "福斯", "奧迪", "寶馬", "賓士", "朋馳", "富豪",
+    "標緻", "斯柯達", "特斯拉", "納智捷", "裕隆", "中華",
+)
+
+
+def _is_car_related_question(text: str) -> bool:
+    """檢查文字是否合理像是一個購車諮詢問題——這是用來判斷機器人
+    在群組/聊天室中是否該回應（取代硬性要求 @mention）的判斷門檻。
+
+    購買／授權限制類用語（例如「多少錢」、「報價」）本身通常不會
+    包含字面上的汽車名詞，但在這個機器人的經銷商諮詢情境中，
+    這些本質上就是與車相關的——因此這些類別也一併納入判斷，
+    而不只是單純的關鍵字清單。
+    """
+    if any(keyword in text for keyword in _CAR_RELATED_KEYWORDS):
+        return True
+    return classify_restricted_topic(text) is not None
 
 
 _UPDATE_KB_KEYWORDS = ("更新知識庫", "更新資料庫", "更新資料")
 
 
 def _is_update_kb_request(text: str) -> bool:
-    """Check if the (mention-stripped) text is asking to update the knowledge base."""
+    """檢查（已去除 mention 的）文字是否在要求更新知識庫。"""
     return any(keyword in text for keyword in _UPDATE_KB_KEYWORDS)
 
 
 _PURCHASE_KEYWORDS = (
     "交易", "買賣", "買", "賣", "購買", "出售", "成交", "待售", "簽約", "合約", "訂單", "報價", "議價", "付款", "下單",
-    # price / discount phrasing that doesn't contain the words above
+    # 不含上述字詞的價格／折扣用語
     "多少錢", "多少費用", "折價", "折扣", "促銷", "團購", "收購", "加價", "優惠",
-    # payment / money-transfer phrasing
+    # 付款／匯款相關用語
     "定金", "匯款", "收款", "轉帳", "儲值", "尾款", "續約", "現金", "發票", "統編",
     "信用卡", "加密貨幣", "比特幣", "扣款", "價目表", "選配金",
 )
 _AUTHORIZATION_PROMISE_KEYWORDS = (
     "授權", "承諾", "保證",
-    # promise/permission synonyms
+    # 承諾／許可的同義詞
     "答應", "准許", "商標",
-    # commercial-use / authorization phrasing without the word "授權"
+    # 不含「授權」字樣的商業使用／授權相關用語
     "商業廣告", "協力廠商", "推薦指定",
 )
 _RESTRICTED_TOPIC_REPLY = (
@@ -115,19 +160,18 @@ _CONTACT_INFO_QUERY_TEMPLATE = (
 
 
 def _purchase_intent_reply() -> str:
-    """Generic fallback contact reply, used when no specific vendor can be matched."""
+    """通用的備援聯絡回覆，用於無法比對出特定廠商時。"""
     return f"{_PURCHASE_INTENT_PREFIX}\n{settings.dealer_contact_info}"
 
-# Phrases that look restricted by keyword alone but are actually plain info
-# questions (e.g. "does this authorized service center exist"), not requests
-# for a transaction/authorization/promise. Stripped before keyword matching
-# so the rest of the message is still checked normally.
+# 這些說法單看關鍵字會被判定為限制主題，但實際上只是單純的資訊
+# 詢問（例如「這個授權服務中心存在嗎」），而不是在要求交易／授權／
+# 承諾。會在關鍵字比對前先被移除，讓訊息的其餘部分仍能照常被檢查。
 _RESTRICTED_TOPIC_EXEMPT_PATTERNS = (
     re.compile(r"授權的?(展示中心|保養廠|維修廠|服務廠)"),
     re.compile(r"申請購買.{0,4}保固|購買.{0,4}延長保固"),
-    # "我要買 X，請給我這款車型的資訊" — buy/sell used only as framing before a
-    # plain info request. Only strips this clause; a genuinely transactional
-    # tail elsewhere in the message (price, payment, etc.) still blocks.
+    # 「我要買 X，請給我這款車型的資訊」——買／賣只是拿來鋪陳
+    # 一個單純資訊詢問的說法。這裡只會移除這個子句；若訊息其他
+    # 地方仍有真正的交易性尾段（價格、付款等），依然會被擋下。
     re.compile(r"(買|賣)\S{0,14}[,，].{0,12}(資訊|規格|資料|介紹|說明)"),
 )
 
@@ -139,25 +183,25 @@ def _strip_exempt_phrases(text: str) -> str:
 
 
 def _is_purchase_intent(text: str) -> bool:
-    """Check if the question touches on buying/selling a car (routes to dealer contact)."""
+    """檢查問題是否涉及買賣車輛（會導向廠商聯絡資訊）。"""
     text = _strip_exempt_phrases(text)
     return any(keyword in text for keyword in _PURCHASE_KEYWORDS)
 
 
 def _is_authorization_or_promise(text: str) -> bool:
-    """Check if the question touches on authorization, trademarks, or promises."""
+    """檢查問題是否涉及授權、商標或承諾。"""
     text = _strip_exempt_phrases(text)
     return any(keyword in text for keyword in _AUTHORIZATION_PROMISE_KEYWORDS)
 
 
 def classify_restricted_topic(text: str) -> str | None:
-    """Classify a question as a restricted topic, if any.
+    """將問題分類為限制主題（若有的話）。
 
-    Returns "authorization_promise", "purchase", or None. Checked in this
-    order because a message that both promises/guarantees *and* mentions
-    buying in passing (e.g. "if I buy this, can you promise...") is
-    fundamentally a promise question, not a purchase inquiry — it should get
-    the generic refusal, not the dealer-contact reply.
+    回傳 "authorization_promise"、"purchase" 或 None。之所以按這個
+    順序檢查，是因為一則同時涉及承諾／保證*又*順帶提到購買的訊息
+    （例如「如果我買這台，你能保證……」）本質上是一個承諾問題，
+    而不是購車詢問——它應該得到通用的婉拒回覆，而不是廠商聯絡資訊
+    的回覆。
     """
     if _is_authorization_or_promise(text):
         return "authorization_promise"
@@ -167,12 +211,12 @@ def classify_restricted_topic(text: str) -> str | None:
 
 
 def _is_restricted_topic(text: str) -> bool:
-    """Check if the question touches on transactions, sales, authorization, or promises."""
+    """檢查問題是否涉及交易、銷售、授權或承諾。"""
     return classify_restricted_topic(text) is not None
 
 
 def _strip_mentions(text: str, mentionees: list[dict]) -> str:
-    """Remove the @mention substrings (e.g. '@BotName') from the message text."""
+    """從訊息文字中移除 @mention 子字串（例如 '@BotName'）。"""
     for m in sorted(mentionees, key=lambda m: m["index"], reverse=True):
         start, length = m["index"], m["length"]
         text = text[:start] + text[start + length:]
@@ -186,11 +230,10 @@ async def _resolve_mention(
     room_id: str | None,
     access_token: str,
 ) -> tuple[str | None, str | None]:
-    """Resolve the asker's (user_id, display_name) so the reply can
-    @mention them — only meaningful in group/room chats where several
-    people may be asking around the same time, and only possible when LINE
-    gave us a sender_user_id (it doesn't for group members who haven't
-    friended the OA)."""
+    """解析出提問者的 (user_id, display_name)，以便回覆時能 @提及
+    對方——這只有在群組/聊天室中才有意義（因為可能同時有多人在
+    發問），而且只有在 LINE 有提供 sender_user_id 時才做得到
+    （若群組成員尚未加官方帳號為好友，LINE 就不會提供）。"""
     if source_type not in ("group", "room") or not sender_user_id:
         return None, None
     display_name = await get_display_name(access_token, sender_user_id, group_id, room_id)
@@ -198,15 +241,14 @@ async def _resolve_mention(
 
 
 async def _show_working_indicator(source_type: str, target_id: str, access_token: str, message: str) -> None:
-    """Best-effort "working on it" feedback while we synchronously wait for
-    the real reply.
-
-    1:1 chats get LINE's native loading animation (show_loading), which
-    doesn't touch the metered push quota. Group/room chats don't support
-    that API at all, so they fall back to a throwaway push message instead
-    — best-effort and silently ignored on failure, since losing this one
-    to the push quota just means no interim feedback, not a lost answer
-    (the actual answer always goes out via reply_text, never push).
+    """
+    在我們同步等待真正的回覆時，盡力提供「處理中」的回饋提示。
+    1:1 聊天會使用 LINE 原生的載入動畫（show_loading），這不會
+    佔用計量的 push 額度。群組/聊天室完全不支援這個 API，因此
+    改用一次性的 push 訊息作為備援——這只是盡力而為，失敗時
+    靜默忽略即可，因為就算這則 push 因額度用盡而失敗，頂多只是
+    少了中間過程的回饋，並不會遺失真正的答案（真正的答案
+    一律透過 reply_text 送出，不使用 push）。
     """
     if source_type == "user":
         await show_loading(target_id, access_token, seconds=30)
@@ -221,7 +263,7 @@ async def _show_working_indicator(source_type: str, target_id: str, access_token
 async def webhook(channel_id: str, request: Request):
     body = await request.body()
 
-    # Look up channel
+    # 查詢 channel
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -233,20 +275,20 @@ async def webhook(channel_id: str, request: Request):
     if not channel:
         raise HTTPException(404, "Channel not found")
 
-    # Check expiry
+    # 檢查是否過期
     if channel["expires_at"]:
         from datetime import datetime, timezone
         if channel["expires_at"] < datetime.now(timezone.utc).isoformat():
             return {"status": "expired"}
 
-    # Verify LINE signature
+    # 驗證 LINE 簽章
     signature = request.headers.get("x-line-signature", "")
     if not verify_signature(body, signature, channel["channel_secret"]):
         raise HTTPException(403, "Invalid signature")
 
     access_token = channel["channel_access_token"]
 
-    # Parse events
+    # 解析事件
     import json
     payload = json.loads(body)
 
@@ -260,32 +302,38 @@ async def webhook(channel_id: str, request: Request):
         source_type = source.get("type")  # "user" | "group" | "room"
         message_type = message.get("type")
         logger.info(f"[{channel_id}] Event payload: {event}")
-
-        # In group/room chats, only respond to TEXT messages when the bot is
-        # explicitly @mentioned. 1:1 chats don't need a mention. File messages
-        # can never carry an @mention on LINE, so this gate doesn't apply to
-        # them — any file sent in a group/room is treated as an update request.
+        """
+         在群組/聊天室中，只回應「文字」訊息，且該訊息必須是合理的
+         購車諮詢問題（見 _is_car_related_question）或明確 @提及了
+         機器人——@mention 這條路徑保留作為關鍵字清單漏接時的備援，
+         而不是必要條件。1:1 聊天則兩者都不需要。檔案訊息在 LINE
+         上永遠不可能帶有 @mention，所以這道門檻不適用於它們——
+         群組/聊天室中傳送的任何檔案都會被視為更新請求。
+        """
         if source_type in ("group", "room") and message_type == "text":
             mentions = _self_mentions(message)
             message_text = message.get("text", "")
             has_text_mention = _has_text_mention(message_text)
-            logger.info(f"[{channel_id}] Parsed mentions for group/room: payload={mentions}, text_has_@={has_text_mention}")
-            # Accept if either mention payload exists OR text contains @-mention syntax (fallback for desktop)
-            if not mentions and not has_text_mention:
-                logger.info(f"[{channel_id}] Ignored group/room message without mention or @-syntax: {message}")
+            is_car_related = _is_car_related_question(message_text)
+            logger.info(
+                f"[{channel_id}] Parsed group/room message: mentions={mentions}, "
+                f"text_has_@={has_text_mention}, car_related={is_car_related}"
+            )
+            if not mentions and not has_text_mention and not is_car_related:
+                logger.info(f"[{channel_id}] Ignored unrelated group/room message: {message}")
                 continue
 
-        # Target for the push reply: group/room chat if present, otherwise the user.
+        # push 回覆的目標對象：若有群組/聊天室則優先使用，否則使用該使用者。
         target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
         if not target_id:
-            # Anonymous group member (hasn't friended the OA) with no usable target — skip.
+            # 匿名群組成員（尚未加官方帳號為好友），沒有可用的目標對象——跳過。
             logger.info(f"[{channel_id}] Skipped: no usable target id in source={source}")
             continue
 
-        # The actual sender, distinct from target_id in group/room chats —
-        # used to keep each person's own NotebookLM conversation thread
-        # separate. LINE omits this for group members who haven't friended
-        # the OA; those questions are still answered, just without memory.
+        # 實際發訊者，在群組/聊天室中與 target_id 不同——
+        # 用來讓每個人各自的 NotebookLM 對話串保持獨立。
+        # 若群組成員尚未加官方帳號為好友，LINE 不會提供這個值；
+        # 這種情況下問題依然會被回答，只是沒有記憶。
         sender_user_id = source.get("userId")
         group_id = source.get("groupId")
         room_id = source.get("roomId")
@@ -299,17 +347,16 @@ async def webhook(channel_id: str, request: Request):
                     else _strip_text_mention_trigger(question)
                 )
 
-            # Resolved once per message and threaded through every reply
-            # below, so a busy group chat can see at a glance whose
-            # question each answer belongs to. None/None in 1:1 chats or
-            # when LINE didn't give us the sender's id.
+            # 每則訊息只解析一次，並貫穿傳遞給下面的每一次回覆，
+            # 讓忙碌的群組聊天能一眼看出每個答案屬於誰的問題。
+            # 在 1:1 聊天或 LINE 未提供發訊者 id 時為 None/None。
             mention_user_id, mention_display_name = await _resolve_mention(
                 source_type, sender_user_id, group_id, room_id, access_token
             )
 
             if source_type in ("group", "room") and not question:
-                # No question text left after stripping the mention —
-                # kept deliberately generic, no vendor name needed here.
+                # 移除 mention 之後沒有剩下任何問題文字——
+                # 這裡刻意保持通用回覆，不需要指定廠商名稱。
                 await reply_text(
                     reply_token, access_token, "請問想問什麼問題呢？",
                     mention_user_id, mention_display_name,
@@ -380,12 +427,11 @@ async def _ask_and_reply(
     mention_user_id: str | None = None,
     mention_display_name: str | None = None,
 ):
-    """Answer a question and deliver it via the reply token (not push) —
-    reply messages aren't metered against the account's monthly LINE
-    message quota the way push messages are. This blocks the webhook
-    handler for as long as the NotebookLM query takes, so very slow
-    queries risk the reply token expiring; that's the accepted tradeoff
-    for not depending on push."""
+    """回答一個問題，並透過 reply token（而非 push）送出——
+    reply 訊息不像 push 訊息那樣會被計入帳號每月的 LINE 訊息額度。
+    這會讓 webhook handler 阻塞至 NotebookLM 查詢完成為止，
+    所以非常慢的查詢有 reply token 過期的風險；這是為了不依賴
+    push 而接受的取捨。"""
     status = "已完成"
     answer_text = ""
     try:
@@ -407,6 +453,11 @@ async def _ask_and_reply(
             )
         except Exception as reply_error:
             logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
+            await notify_admin(
+                f"silent:{channel_id}",
+                f"⚠️ 頻道 {channel_id} 的使用者完全沒收到任何回覆"
+                f"（原始錯誤：{e}；fallback 回覆也失敗：{reply_error}）",
+            )
 
     await _record_interaction(
         channel_id, group_id, room_id, sender_user_id, access_token,
@@ -425,14 +476,14 @@ async def _purchase_intent_ask_and_reply(
     mention_user_id: str | None = None,
     mention_display_name: str | None = None,
 ):
-    """Handle a purchase-intent question: refuse to discuss the transaction
-    itself, but still look up which vendor's car matches and hand back that
-    vendor's contact info (con_info) instead of one hardcoded phone number.
+    """處理一個購車意圖問題：拒絕討論交易本身，但仍會查詢
+    符合條件的是哪一家廠商的車，並回傳該廠商的聯絡資訊
+    （con_info），而不是回傳一個寫死的電話號碼。
 
-    The lookup query is a standalone NotebookLM question (not tied to the
-    user's own conversation thread), so this meta-instruction doesn't leak
-    into their ongoing chat history. Delivered via reply (not push) for the
-    same quota reason as ``_ask_and_reply``.
+    這個查詢是一個獨立的 NotebookLM 問題（不依附於使用者自己的
+    對話串），所以這段 meta-instruction 不會外洩進他們持續進行中
+    的聊天紀錄裡。基於與 ``_ask_and_reply`` 相同的額度考量，
+    透過 reply（而非 push）送出。
     """
     reply = _purchase_intent_reply()
     status = "需人工聯絡"
@@ -440,10 +491,10 @@ async def _purchase_intent_ask_and_reply(
         contact_query = _CONTACT_INFO_QUERY_TEMPLATE.format(question=question)
         messages = await ask_question(channel_id, contact_query, line_user_id=None)
         if any(m.startswith("⚠️") for m in messages):
-            # A real ask_question failure (unbound notebook, API error, etc.)
-            # — not "no vendor matched". Keep the polite generic reply for
-            # the user, but flag it so it doesn't look identical to a
-            # legitimate no-match case in the tracking log.
+            # 這是真正的 ask_question 失敗（筆記本未綁定、API 錯誤等）
+            # ——而不是「沒有比對到廠商」。仍然給使用者禮貌的通用
+            # 回覆，但另外標記狀態，避免在追蹤紀錄中看起來與正常的
+            # 無比對結果一模一樣。
             logger.error(f"[{channel_id}] Contact info lookup returned an error: {messages}")
             status = "異常"
             await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
@@ -463,6 +514,11 @@ async def _purchase_intent_ask_and_reply(
             await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
         except Exception as reply_error:
             logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
+            await notify_admin(
+                f"silent:{channel_id}",
+                f"⚠️ 頻道 {channel_id} 的使用者完全沒收到任何回覆"
+                f"（原始錯誤：{e}；fallback 回覆也失敗：{reply_error}）",
+            )
 
     await _record_interaction(
         channel_id, group_id, room_id, sender_user_id, access_token,
@@ -481,24 +537,22 @@ async def _record_interaction(
     status: str,
     display_name: str | None = None,
 ):
-    """Log a Q&A as a text record in the user's Drive folder plus a row in
-    the tracking Sheet. Best-effort: failures here never affect the LINE
-    conversation, only get logged server-side.
+    """將一次問答記錄成使用者 Drive 資料夾中的文字檔，並在追蹤
+    Sheet 中新增一列。盡力而為：這裡的失敗永遠不會影響 LINE
+    對話，只會記錄在伺服器端。
 
-    ``display_name`` can be passed in already-resolved (e.g. group/room
-    chats already looked it up to build the reply's @mention) to skip a
-    redundant profile lookup; 1:1 chats don't resolve it beforehand, so
-    this fetches it here instead.
+    ``display_name`` 可以傳入已經解析好的值（例如群組/聊天室
+    在建立回覆的 @mention 時已經查過一次），藉此省去重複查詢
+    個人資料；1:1 聊天事先沒有解析過，所以會在這裡重新查詢。
 
-    Awaited by the caller (not fire-and-forget) so it's still part of the
-    in-flight webhook request — a `docker compose up -d` restart (e.g. from
-    the tunnel watchdog swapping tunnels) sends SIGTERM and gives in-flight
-    requests a grace period to finish; an orphaned background task isn't
-    covered by that and would just get killed mid-write, silently dropping
-    the record.
+    由呼叫端 await（而不是 fire-and-forget），讓它仍屬於進行中
+    webhook 請求的一部分——`docker compose up -d` 重啟時
+    （例如 tunnel watchdog 更換 tunnel 時觸發）會送出 SIGTERM，
+    並給進行中的請求一段寬限期完成；孤兒背景任務不在這個
+    保護範圍內，會在寫入途中直接被砍掉，導致紀錄悄悄遺失。
     """
     if not sender_user_id:
-        return  # can't build a per-user folder without a stable identity
+        return  # 沒有穩定的身分識別，就無法建立個人專屬資料夾
 
     try:
         if display_name is None:
@@ -507,16 +561,14 @@ async def _record_interaction(
             channel_id, sender_user_id, display_name
         )
         now = datetime.now(_BEIJING_TZ)
-        # Independent of each other — both only need folder_id/folder_link
-        # from the step above, neither depends on the other's result — so
-        # run them concurrently instead of paying two sequential Google API
-        # round trips after the user has already gotten their reply.
-        # return_exceptions=True so a failure in one still lets the other
-        # finish before this coroutine returns — with the default
-        # return_exceptions=False, gather() raises as soon as the first
-        # awaitable fails and leaves the other running as an orphaned task,
-        # exactly the "gets killed mid-write on SIGTERM" risk this function
-        # is documented to avoid.
+        # 兩者彼此獨立——都只需要上一步得到的 folder_id/folder_link，
+        # 誰都不依賴另一個的結果——所以並行執行它們，而不是在使用者
+        # 已經收到回覆之後，還要依序等待兩次 Google API 往返。
+        # 使用 return_exceptions=True，讓其中一個失敗時，另一個仍能
+        # 在這個協程回傳前完成——若用預設的 return_exceptions=False，
+        # gather() 會在第一個 awaitable 失敗時立刻拋出例外，讓另一個
+        # 變成孤兒任務繼續執行，這正是本函式文件中提到要避免的
+        # 「在 SIGTERM 時寫入途中被砍掉」的風險。
         results = await asyncio.gather(
             google_log_service.save_text_record(folder_id, question, answer, now),
             google_log_service.append_sheet_row(now, display_name, folder_link, status),
@@ -527,6 +579,10 @@ async def _record_interaction(
                 raise result
     except Exception as e:
         logger.error(f"[{channel_id}] Failed to record interaction to Google: {e}")
+        await notify_admin(
+            "google_log",
+            f"⚠️ Google 紀錄寫入失敗（頻道 {channel_id}）：{e}",
+        )
 
 
 async def _upload_and_reply(
@@ -536,8 +592,8 @@ async def _upload_and_reply(
     file_id: str | None,
     file_name: str,
 ):
-    """Update the knowledge base and confirm via reply (not push) — same
-    quota reasoning as ``_ask_and_reply``."""
+    """更新知識庫，並透過 reply（而非 push）確認完成——與
+    ``_ask_and_reply`` 相同的額度考量。"""
     try:
         if not file_id:
             raise ValueError("缺少 LINE 附件 ID")
@@ -551,3 +607,8 @@ async def _upload_and_reply(
             await reply_text(reply_token, access_token, f"⚠️ 更新知識庫失敗：{e}")
         except Exception as reply_error:
             logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
+            await notify_admin(
+                f"silent:{channel_id}",
+                f"⚠️ 頻道 {channel_id} 的檔案上傳者完全沒收到任何回覆"
+                f"（原始錯誤：{e}；fallback 回覆也失敗：{reply_error}）",
+            )

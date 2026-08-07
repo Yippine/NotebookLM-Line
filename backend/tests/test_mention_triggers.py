@@ -2,8 +2,8 @@ from routers.webhook import BOT_NAME, _has_text_mention, _strip_text_mention_tri
 
 
 def test_bare_at_sign_no_longer_triggers():
-    """A bare '@' with no bot name (e.g. an email address, or someone
-    mentioning a different LINE contact) must not be treated as a mention."""
+    """單獨一個沒有機器人名稱的 '@'（例如電子郵件地址，或提及了
+    其他 LINE 聯絡人）不應該被當成一次提及。"""
     assert _has_text_mention("我的信箱是 test@example.com") is False
     assert _has_text_mention("@其他人 你覺得呢") is False
 
