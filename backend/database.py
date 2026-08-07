@@ -41,9 +41,10 @@ async def init_db():
         """)
         await db.commit()
 
-        # Migrate: add columns if missing (for existing DBs)
+        # 遷移：如缺少欄位則新增（適用於既有的資料庫）
         for table, col, col_def in [
             ("channels", "expires_at", "DATETIME"),
+            ("channels", "nlm_health_status", "TEXT"),
             ("invite_codes", "student_name", "TEXT DEFAULT ''"),
             ("invite_codes", "channel_id", "TEXT"),
             ("user_conversations", "drive_folder_id", "TEXT"),

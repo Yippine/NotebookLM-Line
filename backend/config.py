@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     google_oauth_token_path: str = "google-oauth-token.json"
     google_sheet_id: str = ""
     google_drive_parent_folder_id: str = ""
+    admin_line_user_id: str = ""
+    admin_alert_access_token: str = ""
 
     class Config:
         env_file = ".env"

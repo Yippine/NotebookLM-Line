@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from notebooklm import NotebookLMClient, ChatGoal
 from markitdown import MarkItDownException
+from services.alert_service import notify_admin
 from services.crypto_service import encrypt, decrypt
 from services.doc_converter import convert_to_markdown
 from database import DB
@@ -14,26 +15,26 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-# Lock to prevent concurrent env var overwrites
+# 避免並行覆寫環境變數的鎖
 _nlm_lock = asyncio.Lock()
 
-# Reused NotebookLMClient sessions, keyed by channel_id. ask_question is
-# called on every single LINE message, and opening a session via
-# _run_with_auth builds a brand-new httpx.AsyncClient (cold connection pool,
-# so the first RPC pays a fresh TCP/TLS handshake) and closing one writes
-# the cookie jar to disk — pure overhead when the same channel asks another
-# question moments later. Only the hot ask path uses this cache; the
-# infrequent admin operations (upload, configure, list) still go through
-# _run_with_auth's open-then-close-per-call path, since one extra handshake
-# there is negligible next to those operations' own latency and keeping the
-# scope narrow limits the blast radius of a caching bug.
+# 重複使用的 NotebookLMClient session，以 channel_id 為 key。
+# ask_question 會在每一則 LINE 訊息時被呼叫，而透過 _run_with_auth
+# 開啟一個 session 會建立一個全新的 httpx.AsyncClient（連線池是冷的，
+# 所以第一次 RPC 要付出一次全新的 TCP/TLS 交握成本），關閉時又要把
+# cookie jar 寫回磁碟——如果同一個 channel 過一會兒又要問下一個
+# 問題，這些都是純粹的額外開銷。只有這條高頻的提問路徑會用到這個
+# 快取；不常發生的管理操作（上傳、設定、列表）仍然走 _run_with_auth
+# 每次呼叫都開啟再關閉的路徑，因為那邊多一次交握相對於這些操作
+# 本身的延遲來說可以忽略不計，而且把快取的作用範圍限縮得窄一點，
+# 也能限制快取 bug 一旦出現時的影響範圍。
 _client_cache: dict[str, tuple] = {}
 _client_cache_lock = asyncio.Lock()
 
 
 async def _get_cached_client(channel_id: str, auth_json: dict):
-    """Return a cached, already-open NotebookLMClient for this channel,
-    opening one on first use."""
+    """回傳此 channel 已快取、已開啟的 NotebookLMClient，
+    首次使用時才建立。"""
     async with _client_cache_lock:
         cached = _client_cache.get(channel_id)
         if cached is not None:
@@ -56,8 +57,8 @@ async def _get_cached_client(channel_id: str, auth_json: dict):
 
 
 async def _invalidate_client(channel_id: str) -> None:
-    """Drop and close a channel's cached session, e.g. because it went
-    stale or because the channel's auth was just replaced by bind_nlm."""
+    """捨棄並關閉某個 channel 已快取的 session，例如因為它已經
+    失效，或是因為該 channel 的認證資訊剛被 bind_nlm 取代。"""
     async with _client_cache_lock:
         cached = _client_cache.pop(channel_id, None)
     if cached is not None:
@@ -69,7 +70,7 @@ async def _invalidate_client(channel_id: str) -> None:
 
 
 async def aclose_all_clients() -> None:
-    """Close every cached NotebookLM session. Call on app shutdown."""
+    """關閉所有已快取的 NotebookLM session。應在應用程式關閉時呼叫。"""
     async with _client_cache_lock:
         cached_items = list(_client_cache.items())
         _client_cache.clear()
@@ -79,21 +80,20 @@ async def aclose_all_clients() -> None:
         except Exception:
             logger.warning("Failed to close NotebookLM session for channel %s", channel_id)
 
-# Cache of client.sources.list(notebook_id) results, keyed by notebook_id.
-# ask_question needs the id->title map on nearly every question just to
-# label citations, but sources only actually change via
-# replace_sources_for_notebook (which invalidates the relevant entry) — so
-# re-fetching the full list on every single question is a pure-overhead
-# API round-trip most of the time.
+# client.sources.list(notebook_id)結果的快取，以 notebook_id 為 key。
+# ask_question 幾乎每一個問題都需要 id->title 對照表來標註引用來源，
+# 但來源實際上只會透過 replace_sources_for_notebook 改變（它會讓
+# 對應的快取項目失效）——所以每一個問題都重新抓一次完整清單，
+# 大多數時候都是純粹多餘的一次 API 往返。
 _sources_cache: dict[str, list] = {}
 
 
 def _invalidate_sources_cache(notebook_id: str) -> None:
     _sources_cache.pop(notebook_id, None)
 
-# Priority instruction enforced at the NotebookLM notebook level (not just the
-# LINE-side keyword filter in routers/webhook.py), so the model itself refuses
-# these topics even when a question doesn't match the keyword list.
+# 這是在 NotebookLM 筆記本層級強制執行的優先指令（不只是
+# routers/webhook.py 中 LINE 端的關鍵字過濾），讓模型本身即使在
+# 問題沒有比對到關鍵字清單時，也會主動拒答這些主題。
 RESTRICTED_TOPIC_CUSTOM_PROMPT = (
     "你是僅供諮詢用途的客服助理，以下規則優先於所有其他指示：\n"
     "只有當使用者問題的「主要目的」就是交易本身時才需要拒答，包括：詢問價格、報價、"
@@ -108,7 +108,7 @@ RESTRICTED_TOPIC_CUSTOM_PROMPT = (
 
 
 async def configure_restricted_topic_guard(storage_state: dict, notebook_id: str) -> None:
-    """Set the notebook's custom chat persona to refuse transaction-related topics."""
+    """將筆記本的自訂聊天人設設定為拒絕討論交易相關主題。"""
 
     async def _configure(client):
         await client.chat.configure(
@@ -121,15 +121,15 @@ async def configure_restricted_topic_guard(storage_state: dict, notebook_id: str
 
 
 async def _run_with_auth(auth_json: dict, coro_fn):
-    """Run a notebooklm-py operation with the given auth.
+    """以指定的認證資訊執行一個 notebooklm-py 操作。
 
-    NOTEBOOKLM_AUTH_JSON is a single process-wide env var, and notebooklm-py
-    only reads it while opening a session (inside ``__aenter__``) — once
-    open, credentials are bound to the client instance and the env var is
-    never consulted again. So only that handshake needs to be serialized
-    against other channels swapping the env var out from under it; the slow
-    part (asking a question, uploading a source, etc.) runs outside the lock
-    so different channels' requests don't queue behind each other.
+    NOTEBOOKLM_AUTH_JSON 是一個整個行程共用的環境變數，而
+    notebooklm-py 只會在開啟 session 時（在 ``__aenter__`` 內部）
+    讀取它一次——一旦開啟完成，認證資訊就會綁定在該 client
+    實例上，之後不會再去讀取這個環境變數。所以只有這個交握
+    步驟需要與其他 channel 在背後互相調換環境變數的行為做序列化；
+    真正耗時的部分（提問、上傳來源等）都在鎖外執行，這樣不同
+    channel 的請求才不會互相排隊卡住彼此。
     """
     client_ctx = NotebookLMClient.from_storage()
     async with _nlm_lock:
@@ -150,7 +150,7 @@ async def _run_with_auth(auth_json: dict, coro_fn):
 
 
 async def bind_nlm(channel_id: str, storage_state: dict):
-    """Encrypt and store the NLM storage_state, then fetch first notebook ID."""
+    """加密並儲存 NLM 的 storage_state，然後取得第一個筆記本 ID。"""
     encrypted = encrypt(storage_state)
 
     notebooks = await list_notebooks(storage_state)
@@ -166,15 +166,15 @@ async def bind_nlm(channel_id: str, storage_state: dict):
         )
         await db.commit()
 
-    # Any cached session for this channel was opened with the old auth —
-    # drop it so the next ask_question opens a fresh one with the new auth.
+    # 這個 channel 任何已快取的 session 都是用舊的認證資訊開啟的——
+    # 把它捨棄掉，讓下一次 ask_question 用新的認證資訊重新開啟一個。
     await _invalidate_client(channel_id)
 
     return notebook_id, notebooks
 
 
 async def list_notebooks(storage_state: dict) -> list[dict]:
-    """Return list of {id, title} for all notebooks."""
+    """回傳所有筆記本的 {id, title} 清單。"""
     async def _list(client):
         notebooks = await client.notebooks.list()
         return [{"id": nb.id, "title": nb.title} for nb in notebooks]
@@ -183,7 +183,7 @@ async def list_notebooks(storage_state: dict) -> list[dict]:
 
 
 async def list_notebooks_for_channel(channel_id: str) -> list[dict]:
-    """Fetch notebook list using stored cookie for a channel."""
+    """使用某個 channel 已儲存的 cookie 取得筆記本清單。"""
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -200,7 +200,7 @@ async def list_notebooks_for_channel(channel_id: str) -> list[dict]:
 
 
 async def select_notebook(channel_id: str, notebook_id: str):
-    """Update the selected notebook for a channel."""
+    """更新某個 channel 所選擇的筆記本。"""
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -227,20 +227,19 @@ async def replace_sources_for_notebook(
     mime_type: str | None = None,
     title: str | None = None,
 ) -> str:
-    """Upload a file to the notebook.
+    """將檔案上傳到筆記本。
 
-    If an existing source has the same name (title), it is deleted and
-    replaced by the newly uploaded file. Sources with different names are
-    left untouched, so the knowledge base accumulates files instead of being
-    wiped on every upload.
+    若已存在同名（title）的來源，會先刪除它，再以新上傳的檔案
+    取代。不同名稱的來源則不受影響，讓知識庫能持續累積檔案，
+    而不是每次上傳都被清空重來。
     """
 
     async def _replace(client):
         existing_sources = await client.sources.list(notebook_id)
         uploaded_title = title or Path(file_name).name
 
-        # Only sources whose title exactly matches the new file's name are
-        # considered "the same file" and will be overwritten.
+        # 只有標題與新檔案名稱完全相符的來源，才會被視為「同一份
+        # 檔案」而遭到覆蓋。
         duplicate_sources = [
             s for s in existing_sources if s.title == uploaded_title
         ]
@@ -285,7 +284,7 @@ async def update_knowledge_base(
     file_name: str,
     title: str | None = None,
 ) -> str:
-    """Convert an uploaded file to Markdown, then upload it to the channel's notebook."""
+    """將上傳的檔案轉換為 Markdown，再上傳到該 channel 的筆記本。"""
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -321,6 +320,62 @@ async def update_knowledge_base(
         return f"⚠️ 更新知識庫失敗：{e}"
 
 
+async def _set_health_status(channel_id: str, status: str) -> None:
+    async with aiosqlite.connect(DB) as db:
+        await db.execute(
+            "UPDATE channels SET nlm_health_status=? WHERE channel_id=?",
+            (status, channel_id),
+        )
+        await db.commit()
+
+
+async def check_all_channels_health() -> None:
+    """主動探測每個已綁定 channel 的 NotebookLM session，讓失效的
+    cookie 能依排程被發現，而不是要等到某個學生剛好先問了問題
+    （然後還得等有人注意到投訴）。每個 channel 都是獨立檢查的——
+    某一個 channel 的 session 失效，不應該讓其餘 channel 的檢查
+    也跟著停下來。
+
+    通知只在狀態真正從 healthy（或從未檢查過）轉變成 expired 的
+    那一刻發送一次——同一個 channel 持續壞著的話，接下來每 4 小時
+    再檢查到同樣的失敗，不會重複告警，直到它恢復正常、之後又再次
+    壞掉為止，才會發出下一次通知。
+    """
+    async with aiosqlite.connect(DB) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT channel_id, nlm_auth_json_encrypted, nlm_health_status FROM channels "
+            "WHERE nlm_auth_json_encrypted IS NOT NULL AND notebook_id IS NOT NULL"
+        )
+        rows = await cur.fetchall()
+
+    for row in rows:
+        channel_id = row["channel_id"]
+        was_expired = row["nlm_health_status"] == "expired"
+        try:
+            storage_state = decrypt(row["nlm_auth_json_encrypted"])
+            await list_notebooks(storage_state)
+        except Exception as e:
+            logger.warning(f"[{channel_id}] NotebookLM health check failed: {e}")
+            await _set_health_status(channel_id, "expired")
+            if not was_expired:
+                # 剛剛才變成 expired（不是本來就已知壞掉、還沒修好）——
+                # 這是真正值得發一次通知的「狀態轉換」瞬間。
+                await notify_admin(
+                    f"nlm-health:{channel_id}",
+                    f"⚠️ 定期健康檢查發現頻道 {channel_id} 的 NotebookLM 登入已失效：{e}\n"
+                    "請重新 notebooklm login 並更新綁定，目前還沒有學員回報，及早處理可避免影響到他們。",
+                    # 這裡已經用 DB 裡的 healthy/expired 狀態轉換做過精確的
+                    # 防重複判斷了，不需要再疊加 notify_admin 自己那套以
+                    # 時間為準的冷卻機制——否則短時間內真的又壞一次時，
+                    # 會被那個冷卻機制誤擋下來。
+                    cooldown_seconds=0,
+                )
+        else:
+            if was_expired:
+                await _set_health_status(channel_id, "healthy")
+
+
 async def _get_conversation_id(channel_id: str, line_user_id: str) -> str | None:
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute(
@@ -346,13 +401,13 @@ async def _save_conversation_id(channel_id: str, line_user_id: str, conversation
 
 
 async def ask_question(channel_id: str, question: str, line_user_id: str | None = None) -> list[str]:
-    """Load cookie for channel, ask NotebookLM, return LINE-ready answer message(s).
+    """載入該 channel 的 cookie，向 NotebookLM 提問，並回傳可直接
+    用於 LINE 的答案訊息。
 
-    When ``line_user_id`` is given, the question continues that user's own
-    NotebookLM conversation thread on this notebook (persisted across
-    requests), so follow-up questions carry prior context. Without it
-    (e.g. an anonymous group member LINE won't give us an id for), each
-    question is asked standalone.
+    當有提供 ``line_user_id`` 時，這個問題會延續該使用者在這個
+    筆記本上自己的 NotebookLM 對話串（跨請求持久保存），讓後續
+    追問能帶著先前的上下文。若沒有提供（例如 LINE 不會給匿名
+    群組成員一個 id），則每個問題都會獨立提問。
     """
     from services.text_formatter import format_for_line, build_answer_messages
 
@@ -376,7 +431,7 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
 
     async def _ask(client):
         result = await client.chat.ask(notebook_id, question, conversation_id=conversation_id)
-        # Build source_id → title map
+        # 建立 source_id → title 的對照表
         source_map = {}
         if result.references:
             sources = _sources_cache.get(notebook_id)
@@ -387,6 +442,10 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
             for ref in result.references:
                 if ref.citation_number is not None and ref.source_id in id_to_title:
                     source_map[ref.citation_number] = id_to_title[ref.source_id]
+        logger.info(
+            f"[{channel_id}] raw answer (for vendor-split debugging): {result.answer!r} "
+            f"source_map={source_map!r}"
+        )
         return result.answer, result.conversation_id, source_map
 
     try:
@@ -394,9 +453,9 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
             client = await _get_cached_client(channel_id, storage_state)
             answer, new_conversation_id, source_map = await _ask(client)
         except Exception:
-            # The cached session may have gone stale (dropped connection,
-            # expired cookies) — drop it and retry once with a freshly
-            # opened session before surfacing an error to the user.
+            # 快取的 session 可能已經失效（連線中斷、cookie 過期）——
+            # 在把錯誤呈現給使用者之前，先捨棄它並用一個全新開啟的
+            # session 重試一次。
             await _invalidate_client(channel_id)
             client = await _get_cached_client(channel_id, storage_state)
             answer, new_conversation_id, source_map = await _ask(client)
@@ -405,4 +464,9 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
             await _save_conversation_id(channel_id, line_user_id, new_conversation_id)
         return build_answer_messages(format_for_line(answer), source_map)
     except Exception as e:
+        await notify_admin(
+            f"nlm:{channel_id}",
+            f"⚠️ NotebookLM 查詢失敗（頻道 {channel_id}）：{e}\n"
+            "常見原因是登入 cookie 失效，請確認是否需要重新 notebooklm login。",
+        )
         return [f"⚠️ 查詢失敗：{e}"]

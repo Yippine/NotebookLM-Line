@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 async def cleanup_expired():
-    """Delete expired channels and reset their invite codes."""
+    """刪除已過期的 channel，並重設其邀請碼。"""
     async with aiosqlite.connect(DB) as db:
         now = datetime.now(timezone.utc).isoformat()
-        # Find expired channels
+        # 找出已過期的 channel
         cur = await db.execute(
             "SELECT channel_id FROM channels WHERE expires_at IS NOT NULL AND expires_at < ?",
             (now,),
@@ -36,7 +36,7 @@ async def cleanup_expired():
 
 
 async def expiry_scheduler():
-    """Background task: check for expired channels every 60 seconds."""
+    """背景任務：每 60 秒檢查一次是否有已過期的 channel。"""
     while True:
         try:
             await cleanup_expired()
@@ -46,8 +46,8 @@ async def expiry_scheduler():
 
 
 async def conversation_retention_scheduler():
-    """Background task: purge conversation records (tracking-sheet rows and
-    Drive Q&A files) older than the retention window, once a day."""
+    """背景任務：每天清除超過保留期限的對話紀錄（追蹤表的列與
+    Drive 上的問答檔案）。"""
     from services import google_log_service
 
     while True:
@@ -60,14 +60,30 @@ async def conversation_retention_scheduler():
         await asyncio.sleep(24 * 60 * 60)
 
 
+async def nlm_health_scheduler():
+    """背景任務：每隔幾個小時主動探測每個已綁定 channel 的 NotebookLM
+    session，讓失效的登入 cookie 能在學生的提問碰到它之前
+    就被發現並發出告警。"""
+    from services.nlm_service import check_all_channels_health
+
+    while True:
+        try:
+            await check_all_channels_health()
+        except Exception as e:
+            logger.error(f"NotebookLM health check error: {e}")
+        await asyncio.sleep(4 * 60 * 60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     expiry_task = asyncio.create_task(expiry_scheduler())
     retention_task = asyncio.create_task(conversation_retention_scheduler())
+    nlm_health_task = asyncio.create_task(nlm_health_scheduler())
     yield
     expiry_task.cancel()
     retention_task.cancel()
+    nlm_health_task.cancel()
     from services.line_service import aclose_client
     from services.nlm_service import aclose_all_clients
     await aclose_client()
@@ -89,7 +105,7 @@ app.include_router(admin.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(webhook.router)
 
-# Serve React build if exists
+# 如果存在則提供 React 建置後的檔案
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 if not os.path.isdir(static_dir):
     static_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
