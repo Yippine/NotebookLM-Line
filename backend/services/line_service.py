@@ -12,11 +12,11 @@ _client: httpx.AsyncClient | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
-    """Shared, lazily-created client so repeated calls (a single request
-    often makes 2-3: a working-indicator, the reply, a display-name lookup)
-    reuse pooled connections instead of paying a fresh TLS handshake every
-    time. Created lazily since it must be instantiated inside a running
-    event loop, not at import time."""
+    """共用、延遲建立的客戶端，讓多次呼叫（單一請求常常會發出
+    2-3 次：一個處理中指示、一次回覆、一次顯示名稱查詢）能重複
+    使用連線池，而不是每次都要重新做一次 TLS 交握。之所以延遲
+    建立，是因為它必須在一個正在執行的事件迴圈內建立，而不是在
+    模組匯入時就建立。"""
     global _client
     if _client is None:
         _client = httpx.AsyncClient(timeout=30.0)
@@ -24,7 +24,7 @@ def _get_client() -> httpx.AsyncClient:
 
 
 async def aclose_client() -> None:
-    """Close the shared client. Call on app shutdown."""
+    """關閉共用的客戶端。應在應用程式關閉時呼叫。"""
     global _client
     if _client is not None:
         await _client.aclose()
@@ -36,15 +36,15 @@ def _headers(access_token: str) -> dict:
 
 
 def _chunk_messages(text: str) -> list[dict]:
-    """Split long text into LINE messages (max 5000 chars each, max 5 messages)."""
+    """將長文字切分成多則 LINE 訊息（每則最多 5000 字元，最多 5 則）。"""
     chunks = [text[i : i + 5000] for i in range(0, len(text), 5000)]
     return [{"type": "text", "text": c} for c in chunks[:5]]
 
 
 def _build_messages(texts: list[str]) -> list[dict]:
-    """Turn one or more separate message texts (e.g. one per vendor) into
-    LINE message objects, chunking each for the length limit and capping
-    the total at LINE's 5-messages-per-call limit."""
+    """將一則或多則各自獨立的訊息文字（例如每個廠商各一則）轉換成
+    LINE 的訊息物件，各自依長度限制切分，並將總數上限控制在
+    LINE 每次呼叫 5 則訊息的限制內。"""
     messages: list[dict] = []
     for text in texts:
         messages.extend(_chunk_messages(text))
@@ -52,7 +52,7 @@ def _build_messages(texts: list[str]) -> list[dict]:
 
 
 async def show_loading(user_id: str, access_token: str, seconds: int = 20) -> bool:
-    """Show LINE loading animation. Returns True if successful."""
+    """顯示 LINE 的載入動畫。成功則回傳 True。"""
     client = _get_client()
     resp = await client.post(
         "https://api.line.me/v2/bot/chat/loading",
@@ -66,9 +66,9 @@ async def show_loading(user_id: str, access_token: str, seconds: int = 20) -> bo
 
 
 def _prepend_mention(message: dict, user_id: str, display_name: str) -> None:
-    """Mutate a text message so it opens with a real LINE @mention of the
-    given user (not just literal "@name" text) — used so a reply in a busy
-    group chat visibly pings whichever person asked that question."""
+    """修改一則文字訊息，讓它以對指定使用者真正的 LINE @mention
+    開頭（而不只是字面上的 "@name" 文字）——用來讓忙碌的群組聊天
+    中的回覆，能明顯標示出這個回答是在回應誰的問題。"""
     prefix = f"@{display_name} "
     message["text"] = prefix + message["text"]
     message["mention"] = {
@@ -85,18 +85,18 @@ async def reply_text(
     mention_user_id: str | None = None,
     mention_display_name: str | None = None,
 ):
-    """Reply to LINE user with one text, or a list of separate messages
-    (e.g. one per vendor) — auto-chunked per LINE's length/count limits.
+    """以一則文字，或一組各自獨立的訊息（例如每個廠商各一則）
+    回覆 LINE 使用者——依 LINE 的長度／則數限制自動切分。
 
-    When both ``mention_user_id`` and ``mention_display_name`` are given,
-    the first message is prefixed with an @mention of that user (see
-    ``_prepend_mention``) — used in group/room chats so it's clear whose
-    question the reply answers.
+    當同時提供 ``mention_user_id`` 與 ``mention_display_name`` 時，
+    第一則訊息會加上對該使用者的 @mention 前綴（見
+    ``_prepend_mention``）——用於群組/聊天室中，讓人一看就知道
+    這則回覆是在回答誰的問題。
 
-    Unlike push, reply messages aren't metered against the account's
-    monthly message quota, so this is the preferred delivery path. Still
-    checks the response so a failure (bad/expired reply token, etc.) is
-    logged and raised instead of silently swallowed.
+    與 push 不同，reply 訊息不會被計入帳號的每月訊息額度，
+    因此是優先採用的送出方式。這裡仍會檢查回應內容，讓失敗
+    （例如 reply token 無效或過期等）被記錄並拋出，而不是
+    悄悄被吞掉。
     """
     texts = text if isinstance(text, list) else [text]
     client = _get_client()
@@ -114,15 +114,14 @@ async def reply_text(
 
 
 async def push_text(user_id: str, access_token: str, text: str):
-    """Push message to LINE user (for async results).
+    """推送訊息給 LINE 使用者（用於非同步結果）。
 
-    Unlike ``reply_text`` this is the *only* delivery path for
-    background-task results (there's no reply token by the time these
-    fire), so a swallowed failure here means the user silently never gets
-    an answer. A 429 is retried once after honoring ``Retry-After``; any
-    other non-2xx (or a still-429 after retry) is raised so callers' error
-    handling — and the interaction log — actually see it instead of nothing
-    happening.
+    與 ``reply_text`` 不同，這是背景任務結果*唯一*的送出方式
+    （這些任務觸發時已經沒有 reply token 可用了），所以如果這裡
+    的失敗被吞掉，使用者就會悄悄地永遠收不到答案。收到 429 時，
+    會依照 ``Retry-After`` 等待後重試一次；其他任何非 2xx 的
+    回應（或重試後仍是 429）都會被拋出，讓呼叫端的錯誤處理——
+    以及互動紀錄——能真正看見這個失敗，而不是什麼事都沒發生。
     """
     client = _get_client()
     payload = {"to": user_id, "messages": _chunk_messages(text)}
@@ -140,7 +139,7 @@ async def push_text(user_id: str, access_token: str, text: str):
 
 
 async def download_content(message_id: str, access_token: str) -> bytes:
-    """Download LINE message content bytes for file or image attachments."""
+    """下載檔案或圖片附件的 LINE 訊息內容位元組。"""
     client = _get_client()
     resp = await client.get(
         f"{LINE_CONTENT_API}/{message_id}/content",
@@ -157,8 +156,8 @@ async def get_display_name(
     group_id: str | None = None,
     room_id: str | None = None,
 ) -> str:
-    """Look up a user's display name. Falls back to their raw userId if the
-    profile lookup fails (e.g. they haven't friended the OA)."""
+    """查詢使用者的顯示名稱。若個人資料查詢失敗（例如對方尚未
+    加官方帳號為好友），則退回使用其原始 userId。"""
     if group_id:
         url = f"{LINE_API}/group/{group_id}/member/{user_id}"
     elif room_id:

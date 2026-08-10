@@ -12,12 +12,12 @@ from config import settings
 
 router = APIRouter(tags=["admin"])
 
-# In-memory session tokens: token -> invite_code
+# 記憶體內的 session token：token -> invite_code
 _sessions: dict[str, bool] = {}
 _session_codes: dict[str, str] = {}
 
 
-# --- Student-facing APIs ---
+# --- 面向學生的 API ---
 
 @router.post("/verify-invite")
 async def verify_invite(body: InviteVerify):
@@ -30,7 +30,7 @@ async def verify_invite(body: InviteVerify):
         if not row:
             raise HTTPException(400, "邀請碼無效")
 
-        # Check if linked channel has expired
+        # 檢查關聯的 channel 是否已過期
         if row["channel_id"]:
             cur2 = await db.execute(
                 "SELECT expires_at FROM channels WHERE channel_id=?", (row["channel_id"],)
@@ -68,7 +68,7 @@ async def create_channel(body: ChannelCreate, token: str = ""):
                 (body.channel_secret, body.channel_access_token, body.channel_id),
             )
         else:
-            # Auto-apply current expiry setting for new channels
+            # 為新 channel 自動套用目前的過期設定
             cur2 = await db.execute("SELECT expires_at FROM channels WHERE expires_at IS NOT NULL LIMIT 1")
             expiry_row = await cur2.fetchone()
             expires_at = expiry_row[0] if expiry_row else None
@@ -104,7 +104,7 @@ async def get_channel(channel_id: str, token: str = ""):
     )
 
 
-# --- Admin APIs ---
+# --- 管理員 API ---
 
 def _check_admin(password: str):
     if password != settings.admin_password:
@@ -125,13 +125,13 @@ async def generate_invite_codes(count: int = 5, admin_password: str = ""):
 
 @router.post("/admin/import-csv")
 async def import_csv(admin_password: str = "", file: UploadFile = File(...)):
-    """Import student CSV, auto-generate invite codes. CSV needs a 'name' column."""
+    """匯入學生 CSV，自動產生邀請碼。CSV 需要有一個 'name' 欄位。"""
     _check_admin(admin_password)
 
     content = (await file.read()).decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(content))
 
-    # Find name column (flexible matching)
+    # 尋找姓名欄位（彈性比對）
     if not reader.fieldnames:
         raise HTTPException(400, "CSV 格式錯誤：無法讀取欄位")
 
@@ -149,10 +149,10 @@ async def import_csv(admin_password: str = "", file: UploadFile = File(...)):
             raw = row[name_col].strip()
             if not raw:
                 continue
-            # Split multiple names: 頓號、comma、slash
+            # 分割多個姓名：頓號、逗號、斜線
             names = re.split(r"[、,，/]", raw)
             for n in names:
-                # Remove parenthetical annotations like （男）(女)
+                # 移除括號附註，例如 （男）(女)
                 name = re.sub(r"[（(][^）)]*[）)]", "", n).strip()
                 if not name:
                     continue
@@ -197,12 +197,12 @@ async def list_students(admin_password: str = ""):
 
 
 class ExpiresAtRequest(BaseModel):
-    expires_at: str  # ISO format datetime
+    expires_at: str  # ISO 格式的日期時間
 
 
 @router.put("/admin/set-expiry")
 async def set_expiry(body: ExpiresAtRequest, admin_password: str = ""):
-    """Set expiry date for ALL channels (course end date)."""
+    """設定「所有」channel 的過期日期（課程結束日）。"""
     _check_admin(admin_password)
     async with aiosqlite.connect(DB) as db:
         await db.execute("UPDATE channels SET expires_at=?", (body.expires_at,))
@@ -222,7 +222,7 @@ async def delete_channel(channel_id: str, admin_password: str = ""):
 
 @router.delete("/admin/clear-all")
 async def clear_all_bindings(admin_password: str = ""):
-    """Delete all channels and reset all invite codes."""
+    """刪除所有 channel 並重設所有邀請碼。"""
     _check_admin(admin_password)
     async with aiosqlite.connect(DB) as db:
         await db.execute("DELETE FROM channels")
@@ -233,7 +233,7 @@ async def clear_all_bindings(admin_password: str = ""):
 
 @router.get("/admin/export-csv")
 async def export_csv(admin_password: str = ""):
-    """Export student name ↔ invite code mapping as CSV."""
+    """將學生姓名與邀請碼的對應關係匯出成 CSV。"""
     _check_admin(admin_password)
     from fastapi.responses import StreamingResponse
 

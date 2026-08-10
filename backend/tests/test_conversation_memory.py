@@ -19,8 +19,8 @@ class _FakeChatAPI:
 
     async def ask(self, notebook_id, question, source_ids=None, conversation_id=None):
         self.calls.append({"question": question, "conversation_id": conversation_id})
-        # Simulate the server: a fresh id when none was passed in, otherwise
-        # just echo back the same thread's id (continuing it).
+        # 模擬伺服器行為：沒有傳入 id 時給一個全新的，否則就原樣
+        # 回傳同一個對話串的 id（延續它）。
         returned_id = conversation_id or f"conv-{len(self.calls)}"
         return _FakeAskResult(answer=f"answer to: {question}", conversation_id=returned_id)
 
@@ -53,7 +53,7 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setattr(nlm_service, "DB", db_path)
     asyncio.run(database.init_db())
 
-    # Each test gets an isolated client cache — the real cache is module-global.
+    # 每個測試都要有各自獨立的 client 快取——真正的快取是模組層級全域的。
     monkeypatch.setattr(nlm_service, "_client_cache", {})
 
     channel_id = "test-channel"
@@ -96,7 +96,7 @@ def test_different_users_get_independent_conversations(tmp_path, monkeypatch):
     asyncio.run(nlm_service.ask_question(channel_id, "Q1", line_user_id="user-A"))
     asyncio.run(nlm_service.ask_question(channel_id, "Q2", line_user_id="user-B"))
 
-    # user-B's first question must NOT continue user-A's thread.
+    # user-B 的第一個問題絕對不能延續 user-A 的對話串。
     assert client.chat.calls[0]["conversation_id"] is None
     assert client.chat.calls[1]["conversation_id"] is None
 

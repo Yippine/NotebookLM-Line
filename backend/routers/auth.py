@@ -17,7 +17,7 @@ router = APIRouter(tags=["auth"])
 
 
 def _find_storage_state() -> str | None:
-    """Find the most recently created storage_state.json."""
+    """尋找最近建立的 storage_state.json。"""
     home = os.path.expanduser("~")
     patterns = [
         os.path.join(home, ".notebooklm", "profiles", "*", "storage_state.json"),
@@ -34,7 +34,7 @@ def _find_storage_state() -> str | None:
 
 @router.post("/channels/{channel_id}/nlm-login")
 async def nlm_login(channel_id: str, body: NlmLoginRequest):
-    """Upload storage_state.json content to bind NLM."""
+    """上傳 storage_state.json 的內容以綁定 NLM。"""
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute("SELECT channel_id FROM channels WHERE channel_id=?", (channel_id,))
         if not await cur.fetchone():
@@ -55,7 +55,7 @@ async def nlm_login(channel_id: str, body: NlmLoginRequest):
 
 @router.post("/channels/{channel_id}/nlm-bind-local")
 async def nlm_bind_local(channel_id: str):
-    """Auto-read storage_state.json from server filesystem after manual `notebooklm login`."""
+    """在手動執行 `notebooklm login` 後，自動從伺服器檔案系統讀取 storage_state.json。"""
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute("SELECT channel_id FROM channels WHERE channel_id=?", (channel_id,))
         if not await cur.fetchone():
@@ -107,8 +107,8 @@ async def nlm_status(channel_id: str):
 
 @router.post("/channels/{channel_id}/refresh-guard")
 async def refresh_guard(channel_id: str):
-    """Re-push the current restricted-topic persona instruction to an
-    already-bound channel's notebook (e.g. after tuning the prompt text)."""
+    """將目前的限制主題人設指令重新推送到一個
+    已綁定 channel 的筆記本（例如調整 prompt 文字之後）。"""
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -131,7 +131,7 @@ async def refresh_guard(channel_id: str):
 
 @router.get("/channels/{channel_id}/notebooks")
 async def get_notebooks(channel_id: str):
-    """List all notebooks for this channel's bound NLM account."""
+    """列出此 channel 已綁定 NLM 帳號下的所有筆記本。"""
     try:
         notebooks = await list_notebooks_for_channel(channel_id)
     except Exception as e:
@@ -141,7 +141,7 @@ async def get_notebooks(channel_id: str):
 
 @router.put("/channels/{channel_id}/notebook")
 async def set_notebook(channel_id: str, body: NotebookSelect):
-    """Select which notebook to use for this channel."""
+    """選擇此 channel 要使用哪一個筆記本。"""
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute("SELECT channel_id FROM channels WHERE channel_id=?", (channel_id,))
         if not await cur.fetchone():

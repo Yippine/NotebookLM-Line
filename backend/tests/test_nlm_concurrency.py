@@ -13,10 +13,10 @@ class _FakeClient:
 
 
 class _FakeStorageContext:
-    """Stands in for notebooklm.NotebookLMClient.from_storage().
+    """用來替代 notebooklm.NotebookLMClient.from_storage()。
 
-    Mirrors the real library's behavior of the auth handshake:
-    NOTEBOOKLM_AUTH_JSON is only read once, in __aenter__.
+    模擬真實函式庫在認證交握上的行為：
+    NOTEBOOKLM_AUTH_JSON 只會在 __aenter__ 中被讀取一次。
     """
 
     async def __aenter__(self):
@@ -39,12 +39,12 @@ def fake_notebooklm_client(monkeypatch):
 
 
 def test_concurrent_channels_do_not_cross_contaminate_auth_and_run_in_parallel():
-    """Two channels' slow operations must not corrupt each other's auth,
-    and must not serialize behind one another (only the handshake should)."""
+    """兩個 channel 各自緩慢的操作，彼此的認證資訊不能互相污染，
+    而且彼此不應該序列化排隊執行（只有交握本身才應該序列化）。"""
 
     async def slow_op(client, sleep_for: float):
-        # Runs *after* the handshake lock is released. If the lock still
-        # covered this, two concurrent calls would take sleep_for * 2.
+        # 在交握鎖釋放*之後*才執行。如果鎖仍然涵蓋這段，
+        # 兩個並行呼叫就會需要 sleep_for * 2 的時間。
         await asyncio.sleep(sleep_for)
         return client.auth
 
@@ -67,7 +67,7 @@ def test_concurrent_channels_do_not_cross_contaminate_auth_and_run_in_parallel()
 
     assert results[0] == '{"channel": "A"}'
     assert results[1] == '{"channel": "B"}'
-    # Serialized behind one lock: ~0.6s. Parallel slow parts: ~0.3s.
+    # 若被同一把鎖序列化：約需 0.6 秒。並行執行緩慢部分：約需 0.3 秒。
     assert elapsed < 0.5, f"expected concurrent execution, took {elapsed:.2f}s"
 
 

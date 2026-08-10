@@ -42,7 +42,7 @@ def _setup(tmp_path, monkeypatch, client_factory=None):
     monkeypatch.setattr(nlm_service, "DB", db_path)
     asyncio.run(database.init_db())
 
-    # Each test gets isolated caches — the real caches are module-global.
+    # 每個測試都要有各自獨立的快取——真正的快取是模組層級全域的。
     monkeypatch.setattr(nlm_service, "_sources_cache", {})
     monkeypatch.setattr(nlm_service, "_client_cache", {})
 
@@ -58,9 +58,9 @@ def _setup(tmp_path, monkeypatch, client_factory=None):
     conn.commit()
     conn.close()
 
-    # Every from_storage().__aenter__()/__aexit__() call is recorded so tests
-    # can assert how many sessions were actually opened/closed, independent
-    # of how many questions were asked.
+    # 每一次 from_storage().__aenter__()/__aexit__() 呼叫都會被記錄，
+    # 讓測試能斷言實際開啟/關閉了多少個 session，
+    # 這與問了多少個問題無關。
     opened = []
     closed = []
 
@@ -95,14 +95,14 @@ def test_session_is_reused_across_questions(tmp_path, monkeypatch):
     asyncio.run(nlm_service.ask_question(channel_id, "Q2", line_user_id="user-A"))
     asyncio.run(nlm_service.ask_question(channel_id, "Q3", line_user_id="user-A"))
 
-    assert len(opened) == 1  # one session opened, reused for all three questions
+    assert len(opened) == 1  # 只開啟了一個 session，三個問題都重複使用它
     assert opened[0].chat.calls == 3
-    assert closed == []  # never torn down between questions
+    assert closed == []  # 問題與問題之間從未被拆掉重建
 
 
 def test_stale_session_is_invalidated_and_retried(tmp_path, monkeypatch):
-    # First session's very first ask fails (simulating a dropped connection
-    # or expired cookies); the second session (opened on retry) succeeds.
+    # 第一個 session 的第一次提問就失敗（模擬連線中斷或 cookie
+    # 過期）；重試時開啟的第二個 session 則會成功。
     clients = [_FakeClient(fail_calls=1), _FakeClient()]
 
     def factory():
@@ -112,9 +112,9 @@ def test_stale_session_is_invalidated_and_retried(tmp_path, monkeypatch):
 
     messages = asyncio.run(nlm_service.ask_question(channel_id, "Q1", line_user_id="user-A"))
 
-    assert len(opened) == 2  # first session failed, a fresh one was opened
-    assert len(closed) == 1  # the failed session was closed, not leaked
-    assert "查詢失敗" not in messages[0]  # the retry succeeded transparently
+    assert len(opened) == 2  # 第一個 session 失敗了，於是開了一個全新的
+    assert len(closed) == 1  # 失敗的 session 有被正確關閉，沒有洩漏
+    assert "查詢失敗" not in messages[0]  # 重試在使用者無感知的情況下成功了
 
 
 def test_manual_invalidate_forces_fresh_session_next_time(tmp_path, monkeypatch):
@@ -135,7 +135,7 @@ def test_aclose_all_clients_closes_and_clears_cache(tmp_path, monkeypatch):
     channel_id, opened, closed = _setup(tmp_path, monkeypatch)
 
     asyncio.run(nlm_service.ask_question(channel_id, "Q1", line_user_id="user-A"))
-    assert nlm_service._client_cache  # something is cached
+    assert nlm_service._client_cache  # 快取中有東西
 
     asyncio.run(nlm_service.aclose_all_clients())
 

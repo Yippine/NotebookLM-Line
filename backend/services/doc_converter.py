@@ -7,11 +7,10 @@ _converter = MarkItDown()
 
 
 def convert_to_markdown(file_bytes: bytes, file_name: str) -> tuple[bytes, str]:
-    """Convert an uploaded document to Markdown text.
+    """將上傳的文件轉換為 Markdown 文字。
 
-    Returns (markdown_bytes, markdown_file_name). Raises
-    ``markitdown.MarkItDownException`` if the format isn't supported or the
-    content can't be parsed.
+    回傳 (markdown_bytes, markdown_file_name)。若格式不受支援或
+    內容無法解析，會拋出 ``markitdown.MarkItDownException``。
     """
     extension = Path(file_name).suffix or None
     result = _converter.convert_stream(io.BytesIO(file_bytes), file_extension=extension)

@@ -14,7 +14,7 @@ class _FakeResponse:
 
 
 def _patch_post(monkeypatch, responses):
-    """Make httpx.AsyncClient.post return each of ``responses`` in order."""
+    """讓 httpx.AsyncClient.post 依序回傳 ``responses`` 中的每一個回應。"""
     calls = []
 
     async def fake_post(self, url, headers=None, json=None):

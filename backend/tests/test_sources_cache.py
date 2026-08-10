@@ -70,7 +70,7 @@ def _setup(tmp_path, monkeypatch, notebook_id="notebook-1"):
     monkeypatch.setattr(nlm_service, "DB", db_path)
     asyncio.run(database.init_db())
 
-    # Each test gets isolated caches — the real caches are module-global.
+    # 每個測試都要有各自獨立的快取——真正的快取是模組層級全域的。
     monkeypatch.setattr(nlm_service, "_sources_cache", {})
     monkeypatch.setattr(nlm_service, "_client_cache", {})
 
@@ -106,7 +106,7 @@ def test_sources_list_is_cached_across_questions(tmp_path, monkeypatch):
     asyncio.run(nlm_service.ask_question(channel_id, "Q3", line_user_id="user-A"))
 
     assert client.chat.calls == 3
-    assert client.sources.list_calls == 1  # fetched once, reused for Q2 and Q3
+    assert client.sources.list_calls == 1  # 只抓取一次，Q2 和 Q3 重複使用
 
 
 def test_sources_cache_invalidated_after_knowledge_base_update(tmp_path, monkeypatch):
@@ -118,4 +118,4 @@ def test_sources_cache_invalidated_after_knowledge_base_update(tmp_path, monkeyp
     nlm_service._invalidate_sources_cache("notebook-1")
 
     asyncio.run(nlm_service.ask_question(channel_id, "Q2", line_user_id="user-A"))
-    assert client.sources.list_calls == 2  # re-fetched after invalidation
+    assert client.sources.list_calls == 2  # 快取失效後重新抓取
