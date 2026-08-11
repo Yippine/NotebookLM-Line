@@ -85,6 +85,47 @@ def test_push_failure_is_swallowed_not_raised(monkeypatch):
     asyncio.run(alert_service.notify_admin("some-key", "message"))
 
 
+def test_sends_to_multiple_admins_when_comma_separated(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "U-admin1, U-admin2 ,U-admin3")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    calls = []
+
+    async def fake_push_text(user_id, access_token, text):
+        calls.append((user_id, text))
+
+    monkeypatch.setattr(alert_service, "push_text", fake_push_text)
+
+    asyncio.run(alert_service.notify_admin("some-key", "tunnel is down"))
+
+    assert sorted(calls) == [
+        ("U-admin1", "tunnel is down"),
+        ("U-admin2", "tunnel is down"),
+        ("U-admin3", "tunnel is down"),
+    ]
+
+
+def test_one_admins_push_failure_does_not_block_the_others(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "U-good1,U-bad,U-good2")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    calls = []
+
+    async def fake_push_text(user_id, access_token, text):
+        if user_id == "U-bad":
+            raise RuntimeError("this user unfriended the bot")
+        calls.append(user_id)
+
+    monkeypatch.setattr(alert_service, "push_text", fake_push_text)
+
+    # 不應拋出例外，且另外兩個人仍要收到。
+    asyncio.run(alert_service.notify_admin("some-key", "message"))
+
+    assert sorted(calls) == ["U-good1", "U-good2"]
+
+
 def test_cooldown_seconds_override_bypasses_default_window(monkeypatch):
     """A caller with its own precise dedup (e.g. a DB-backed state
     transition) can pass cooldown_seconds=0 to send immediately even

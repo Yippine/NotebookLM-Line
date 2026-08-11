@@ -45,38 +45,34 @@ def test_working_indicator_falls_back_to_push_for_group_chats(monkeypatch):
 
 
 def test_working_indicator_push_failure_is_swallowed_not_raised(monkeypatch):
-    """Non-critical: losing the loading indicator to the push quota must
-    never block or fail the actual answer flow."""
+    """非關鍵路徑：載入提示因為 push 額度用盡而遺失，絕不能阻塞
+    或使真正的回答流程失敗。"""
     async def fake_push_text(target_id, access_token, text):
         raise RuntimeError("LINE push 失敗：429 monthly limit")
 
     monkeypatch.setattr(webhook, "push_text", fake_push_text)
 
     _run(webhook._show_working_indicator("group", "target-1", "token-1", "⏳正在查詢中，請稍後"))
-    # no exception raised — success
+    # 沒有拋出例外——即為成功
 
 
 def test_purchase_intent_replies_with_matched_vendor_contact_info(monkeypatch):
-    """When the con_info lookup finds a matching vendor, the reply should
-    lead with the refusal prefix, then the vendor-labeled contact info —
-    not the generic single dealer_contact_info fallback. Delivered via
-    reply_text (not push_text), since replies aren't quota-metered."""
+    """當 con_info 查詢比對到相符的廠商時，回覆內容應該先是拒答的
+    前綴，接著才是帶有廠商標籤的聯絡資訊——而不是通用的單一
+    dealer_contact_info 備援回覆。透過 reply_text（而非 push_text）
+    送出，因為 reply 不會被計入額度。"""
     replied = []
 
     async def fake_ask_question(channel_id, question, line_user_id=None):
-        assert line_user_id is None  # standalone lookup, not tied to user's thread
+        assert line_user_id is None  # 這是獨立查詢，不依附於使用者的對話串
         assert "con_info" in question
         return ["【SUM】\n\n電話：02-1234-5678"]
 
     async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
         replied.append(text)
 
-    async def fake_record_interaction(*args, **kwargs):
-        pass
-
     monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
     monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
-    monkeypatch.setattr(webhook, "_record_interaction", fake_record_interaction)
 
     _run(webhook._purchase_intent_ask_and_reply(
         "channel-1", "reply-token-1", "token-1",
@@ -93,9 +89,9 @@ def test_purchase_intent_replies_with_matched_vendor_contact_info(monkeypatch):
 
 
 def test_purchase_intent_falls_back_when_no_vendor_matched(monkeypatch):
-    """If the lookup can't attribute any vendor (e.g. a generic 'I want to
-    buy a car' question with nothing to match), fall back to the generic
-    dealer_contact_info reply instead of an unlabeled/confusing message."""
+    """如果查詢無法歸屬到任何廠商（例如一個通用的「我想買車」問題，
+    沒有任何東西可以比對），就退回使用通用的 dealer_contact_info
+    回覆，而不是一則沒有標籤、令人困惑的訊息。"""
     replied = []
 
     async def fake_ask_question(channel_id, question, line_user_id=None):
@@ -104,12 +100,8 @@ def test_purchase_intent_falls_back_when_no_vendor_matched(monkeypatch):
     async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
         replied.append(text)
 
-    async def fake_record_interaction(*args, **kwargs):
-        pass
-
     monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
     monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
-    monkeypatch.setattr(webhook, "_record_interaction", fake_record_interaction)
 
     _run(webhook._purchase_intent_ask_and_reply(
         "channel-1", "reply-token-1", "token-1", "我要買車",
@@ -120,13 +112,11 @@ def test_purchase_intent_falls_back_when_no_vendor_matched(monkeypatch):
     assert settings.dealer_contact_info in replied[0]
 
 
-def test_purchase_intent_ask_question_error_is_marked_abnormal_not_no_match(monkeypatch):
-    """A real ask_question failure (e.g. NotebookLM not bound) must not be
-    indistinguishable from a legitimate "no vendor matched" case — it
-    should still reply politely, but the tracking log needs to show 異常
-    so admins can tell a broken lookup apart from a normal no-match."""
+def test_purchase_intent_ask_question_error_still_gets_polite_reply(monkeypatch):
+    """一個真正的 ask_question 失敗（例如 NotebookLM 未綁定），
+    不能讓使用者看到原始的 ⚠️ 錯誤文字——仍然要給禮貌的通用回覆，
+    跟「沒有比對到廠商」時看起來一樣，不讓使用者感覺到後端出錯。"""
     replied = []
-    recorded = []
 
     async def fake_ask_question(channel_id, question, line_user_id=None):
         return ["⚠️ NotebookLM 尚未綁定，請聯繫管理員完成設定。"]
@@ -134,12 +124,8 @@ def test_purchase_intent_ask_question_error_is_marked_abnormal_not_no_match(monk
     async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
         replied.append(text)
 
-    async def fake_record_interaction(channel_id, group_id, room_id, sender_user_id, access_token, question, answer, status, display_name=None):
-        recorded.append(status)
-
     monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
     monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
-    monkeypatch.setattr(webhook, "_record_interaction", fake_record_interaction)
 
     _run(webhook._purchase_intent_ask_and_reply(
         "channel-1", "reply-token-1", "token-1", "我要買 Corolla Cross",
@@ -147,39 +133,11 @@ def test_purchase_intent_ask_question_error_is_marked_abnormal_not_no_match(monk
     ))
 
     assert len(replied) == 1
-    assert settings.dealer_contact_info in replied[0]  # still a polite reply, not the raw ⚠️ text
-    assert recorded == ["異常"]
-
-
-def test_purchase_intent_no_match_case_keeps_normal_status(monkeypatch):
-    """Contrast with the error case above: a genuine no-vendor-matched
-    answer (no ⚠️, just no 【vendor】 header either) stays 需人工聯絡, not 異常."""
-    recorded = []
-
-    async def fake_ask_question(channel_id, question, line_user_id=None):
-        return ["很抱歉，目前的資料無法明確對應到特定廠商，請提供更明確的條件（如廠牌、車型）以便查詢。"]
-
-    async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
-        pass
-
-    async def fake_record_interaction(channel_id, group_id, room_id, sender_user_id, access_token, question, answer, status, display_name=None):
-        recorded.append(status)
-
-    monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
-    monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
-    monkeypatch.setattr(webhook, "_record_interaction", fake_record_interaction)
-
-    _run(webhook._purchase_intent_ask_and_reply(
-        "channel-1", "reply-token-1", "token-1", "我要買車",
-        sender_user_id="user-1",
-    ))
-
-    assert recorded == ["需人工聯絡"]
+    assert settings.dealer_contact_info in replied[0]  # 仍是禮貌的回覆，而不是原始的 ⚠️ 文字
 
 
 def test_purchase_intent_falls_back_on_lookup_error(monkeypatch):
     replied = []
-    recorded = []
 
     async def fake_ask_question(channel_id, question, line_user_id=None):
         raise RuntimeError("boom")
@@ -187,12 +145,8 @@ def test_purchase_intent_falls_back_on_lookup_error(monkeypatch):
     async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
         replied.append(text)
 
-    async def fake_record_interaction(channel_id, group_id, room_id, sender_user_id, access_token, question, answer, status, display_name=None):
-        recorded.append(status)
-
     monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
     monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
-    monkeypatch.setattr(webhook, "_record_interaction", fake_record_interaction)
 
     _run(webhook._purchase_intent_ask_and_reply(
         "channel-1", "reply-token-1", "token-1", "我要買 Corolla Cross",
@@ -201,7 +155,6 @@ def test_purchase_intent_falls_back_on_lookup_error(monkeypatch):
 
     assert len(replied) == 1
     assert settings.dealer_contact_info in replied[0]
-    assert recorded == ["異常"]
 
 
 def test_ask_and_reply_delivers_answer_via_reply(monkeypatch):
@@ -213,12 +166,8 @@ def test_ask_and_reply_delivers_answer_via_reply(monkeypatch):
     async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
         replied.append(text)
 
-    async def fake_record_interaction(*args, **kwargs):
-        pass
-
     monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
     monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
-    monkeypatch.setattr(webhook, "_record_interaction", fake_record_interaction)
 
     _run(webhook._ask_and_reply(
         "channel-1", "reply-token-1", "token-1", "Corolla Cross 有哪些",

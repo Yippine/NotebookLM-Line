@@ -1,17 +1,15 @@
-import asyncio
 import hashlib
 import hmac
 import base64
 import logging
 import re
-from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Request, HTTPException
 import aiosqlite
 from config import settings
 from database import DB
-from services import google_log_service
 from services.alert_service import notify_admin
 from services.nlm_service import ask_question, update_knowledge_base
+from services.text_formatter import vendor_from_title
 from services.line_service import (
     show_loading,
     reply_text,
@@ -22,8 +20,6 @@ from services.line_service import (
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
-
-_BEIJING_TZ = timezone(timedelta(hours=8))
 
 # 機器人在 LINE 上的顯示名稱（實際名稱是在 LINE Official
 # Account Manager 另外設定的——這個常數只控制本程式碼會
@@ -292,11 +288,28 @@ async def webhook(channel_id: str, request: Request):
     import json
     payload = json.loads(body)
 
-    for event in payload.get("events", []):
+    events = payload.get("events", [])
+
+    # LINE 針對「一次選取多個檔案上傳」通常會把它們包成同一個
+    # webhook 請求裡的多個 message event，各自帶有各自的
+    # reply_token。整批先處理掉，才能只顯示一次「正在更新」提示、
+    # 合併成一則完成通知，而不是每個檔案各自洗一次版（見
+    # _handle_file_batch）。
+    file_events = [
+        e for e in events
+        if e.get("type") == "message" and e.get("message", {}).get("type") == "file"
+    ]
+    if file_events:
+        await _handle_file_batch(channel_id, access_token, file_events)
+
+    for event in events:
         if event.get("type") != "message":
             continue
 
         message = event["message"]
+        if message.get("type") == "file":
+            continue  # 已經在上面整批處理過了
+
         reply_token = event["replyToken"]
         source = event["source"]
         source_type = source.get("type")  # "user" | "group" | "room"
@@ -378,11 +391,6 @@ async def webhook(channel_id: str, request: Request):
                     reply_token, access_token, _RESTRICTED_TOPIC_REPLY,
                     mention_user_id, mention_display_name,
                 )
-                await _record_interaction(
-                    channel_id, group_id, room_id, sender_user_id, access_token,
-                    question, _RESTRICTED_TOPIC_REPLY, "需人工聯絡",
-                    display_name=mention_display_name,
-                )
                 continue
             if restricted_topic == "purchase":
                 await _show_working_indicator(source_type, target_id, access_token, "⏳正在查詢中，請稍後")
@@ -403,16 +411,6 @@ async def webhook(channel_id: str, request: Request):
             )
             continue
 
-        if message_type == "file":
-            file_name = message.get("fileName") or "uploaded_file"
-            file_id = message.get("id")
-
-            await _show_working_indicator(source_type, target_id, access_token, "⏳正在更新知識庫，請稍後")
-
-            await _upload_and_reply(
-                channel_id, reply_token, access_token, file_id, file_name,
-            )
-
     return {"status": "ok"}
 
 
@@ -432,20 +430,13 @@ async def _ask_and_reply(
     這會讓 webhook handler 阻塞至 NotebookLM 查詢完成為止，
     所以非常慢的查詢有 reply token 過期的風險；這是為了不依賴
     push 而接受的取捨。"""
-    status = "已完成"
-    answer_text = ""
     try:
         messages = await ask_question(channel_id, question, sender_user_id)
         if not messages:
             messages = ["⚠️ 沒有取得回覆內容，請稍後再試。"]
-        answer_text = "\n".join(messages)
-        if any(msg.startswith("⚠️") for msg in messages):
-            status = "異常"
         await reply_text(reply_token, access_token, messages, mention_user_id, mention_display_name)
     except Exception as e:
         logger.error(f"[{channel_id}] Error: {e}")
-        status = "異常"
-        answer_text = f"系統發生錯誤：{e}"
         try:
             await reply_text(
                 reply_token, access_token, "⚠️ 系統發生錯誤，請稍後再試。",
@@ -458,11 +449,6 @@ async def _ask_and_reply(
                 f"⚠️ 頻道 {channel_id} 的使用者完全沒收到任何回覆"
                 f"（原始錯誤：{e}；fallback 回覆也失敗：{reply_error}）",
             )
-
-    await _record_interaction(
-        channel_id, group_id, room_id, sender_user_id, access_token,
-        question, answer_text, status, display_name=mention_display_name,
-    )
 
 
 async def _purchase_intent_ask_and_reply(
@@ -486,17 +472,13 @@ async def _purchase_intent_ask_and_reply(
     透過 reply（而非 push）送出。
     """
     reply = _purchase_intent_reply()
-    status = "需人工聯絡"
     try:
         contact_query = _CONTACT_INFO_QUERY_TEMPLATE.format(question=question)
         messages = await ask_question(channel_id, contact_query, line_user_id=None)
         if any(m.startswith("⚠️") for m in messages):
             # 這是真正的 ask_question 失敗（筆記本未綁定、API 錯誤等）
-            # ——而不是「沒有比對到廠商」。仍然給使用者禮貌的通用
-            # 回覆，但另外標記狀態，避免在追蹤紀錄中看起來與正常的
-            # 無比對結果一模一樣。
+            # ——而不是「沒有比對到廠商」。仍然給使用者禮貌的通用回覆。
             logger.error(f"[{channel_id}] Contact info lookup returned an error: {messages}")
-            status = "異常"
             await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
         else:
             vendor_messages = [m for m in messages if m.startswith("【")]
@@ -504,12 +486,10 @@ async def _purchase_intent_ask_and_reply(
                 intro = f"{_PURCHASE_INTENT_PREFIX}\n\n{_PURCHASE_INTENT_CONTACT_LEAD_IN}"
                 reply_messages = [intro] + vendor_messages
                 await reply_text(reply_token, access_token, reply_messages, mention_user_id, mention_display_name)
-                reply = "\n".join(reply_messages)
             else:
                 await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
     except Exception as e:
         logger.error(f"[{channel_id}] Error looking up vendor contact info: {e}")
-        status = "異常"
         try:
             await reply_text(reply_token, access_token, reply, mention_user_id, mention_display_name)
         except Exception as reply_error:
@@ -520,69 +500,25 @@ async def _purchase_intent_ask_and_reply(
                 f"（原始錯誤：{e}；fallback 回覆也失敗：{reply_error}）",
             )
 
-    await _record_interaction(
-        channel_id, group_id, room_id, sender_user_id, access_token,
-        question, reply, status, display_name=mention_display_name,
-    )
 
+async def _process_one_upload(
+    channel_id: str, access_token: str, file_id: str | None, file_name: str
+) -> str:
+    """下載一個 LINE 檔案附件並更新知識庫，回傳結果訊息。
 
-async def _record_interaction(
-    channel_id: str,
-    group_id: str | None,
-    room_id: str | None,
-    sender_user_id: str | None,
-    access_token: str,
-    question: str,
-    answer: str,
-    status: str,
-    display_name: str | None = None,
-):
-    """將一次問答記錄成使用者 Drive 資料夾中的文字檔，並在追蹤
-    Sheet 中新增一列。盡力而為：這裡的失敗永遠不會影響 LINE
-    對話，只會記錄在伺服器端。
-
-    ``display_name`` 可以傳入已經解析好的值（例如群組/聊天室
-    在建立回覆的 @mention 時已經查過一次），藉此省去重複查詢
-    個人資料；1:1 聊天事先沒有解析過，所以會在這裡重新查詢。
-
-    由呼叫端 await（而不是 fire-and-forget），讓它仍屬於進行中
-    webhook 請求的一部分——`docker compose up -d` 重啟時
-    （例如 tunnel watchdog 更換 tunnel 時觸發）會送出 SIGTERM，
-    並給進行中的請求一段寬限期完成；孤兒背景任務不在這個
-    保護範圍內，會在寫入途中直接被砍掉，導致紀錄悄悄遺失。
-    """
-    if not sender_user_id:
-        return  # 沒有穩定的身分識別，就無法建立個人專屬資料夾
-
+    失敗時回傳可以直接顯示給使用者看的 ⚠️ 訊息，不往外拋出例外，
+    這樣不管是單一檔案上傳（_upload_and_reply）還是批次上傳
+    （_handle_file_batch）都能安全地收集每個檔案各自的結果，
+    一個檔案失敗不會中斷其他檔案的處理。"""
     try:
-        if display_name is None:
-            display_name = await get_display_name(access_token, sender_user_id, group_id, room_id)
-        folder_id, folder_link = await google_log_service.get_or_create_user_folder(
-            channel_id, sender_user_id, display_name
-        )
-        now = datetime.now(_BEIJING_TZ)
-        # 兩者彼此獨立——都只需要上一步得到的 folder_id/folder_link，
-        # 誰都不依賴另一個的結果——所以並行執行它們，而不是在使用者
-        # 已經收到回覆之後，還要依序等待兩次 Google API 往返。
-        # 使用 return_exceptions=True，讓其中一個失敗時，另一個仍能
-        # 在這個協程回傳前完成——若用預設的 return_exceptions=False，
-        # gather() 會在第一個 awaitable 失敗時立刻拋出例外，讓另一個
-        # 變成孤兒任務繼續執行，這正是本函式文件中提到要避免的
-        # 「在 SIGTERM 時寫入途中被砍掉」的風險。
-        results = await asyncio.gather(
-            google_log_service.save_text_record(folder_id, question, answer, now),
-            google_log_service.append_sheet_row(now, display_name, folder_link, status),
-            return_exceptions=True,
-        )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        if not file_id:
+            raise ValueError("缺少 LINE 附件 ID")
+
+        file_bytes = await download_content(file_id, access_token)
+        return await update_knowledge_base(channel_id, file_bytes, file_name)
     except Exception as e:
-        logger.error(f"[{channel_id}] Failed to record interaction to Google: {e}")
-        await notify_admin(
-            "google_log",
-            f"⚠️ Google 紀錄寫入失敗（頻道 {channel_id}）：{e}",
-        )
+        logger.error(f"[{channel_id}] Upload error for {file_name}: {e}")
+        return f"⚠️ 更新知識庫失敗：{e}"
 
 
 async def _upload_and_reply(
@@ -594,21 +530,79 @@ async def _upload_and_reply(
 ):
     """更新知識庫，並透過 reply（而非 push）確認完成——與
     ``_ask_and_reply`` 相同的額度考量。"""
+    message = await _process_one_upload(channel_id, access_token, file_id, file_name)
     try:
-        if not file_id:
-            raise ValueError("缺少 LINE 附件 ID")
-
-        file_bytes = await download_content(file_id, access_token)
-        message = await update_knowledge_base(channel_id, file_bytes, file_name)
         await reply_text(reply_token, access_token, message)
-    except Exception as e:
-        logger.error(f"[{channel_id}] Upload error: {e}")
-        try:
-            await reply_text(reply_token, access_token, f"⚠️ 更新知識庫失敗：{e}")
-        except Exception as reply_error:
-            logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
-            await notify_admin(
-                f"silent:{channel_id}",
-                f"⚠️ 頻道 {channel_id} 的檔案上傳者完全沒收到任何回覆"
-                f"（原始錯誤：{e}；fallback 回覆也失敗：{reply_error}）",
-            )
+    except Exception as reply_error:
+        logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
+        await notify_admin(
+            f"silent:{channel_id}",
+            f"⚠️ 頻道 {channel_id} 的檔案上傳者完全沒收到任何回覆"
+            f"（fallback 回覆失敗：{reply_error}）",
+        )
+
+
+_UPLOAD_SUCCESS_RE = re.compile(r"已(?:新增檔案|覆蓋同名舊檔案並上傳)：(.+)$")
+_MAX_VENDOR_NAMES_SHOWN = 5
+
+
+def _summarize_upload_results(results: list[str]) -> str:
+    """把多個檔案各自的更新結果，合併成一則訊息：成功的只列出
+    廠商名稱（最多顯示前 5 個，其餘用「...等N份」帶過，避免一次
+    上傳十幾家廠商的資料時洗版），失敗的維持原本完整的錯誤訊息，
+    讓使用者知道哪些檔案需要重新上傳。"""
+    vendors = []
+    failures = []
+    for r in results:
+        match = _UPLOAD_SUCCESS_RE.search(r)
+        if match:
+            vendors.append(vendor_from_title(match.group(1)))
+        else:
+            failures.append(r)
+
+    parts = []
+    if vendors:
+        shown = "、".join(vendors[:_MAX_VENDOR_NAMES_SHOWN])
+        if len(vendors) > _MAX_VENDOR_NAMES_SHOWN:
+            shown += f"...等{len(vendors)}份"
+        parts.append(f"✅ 知識庫已更新：{shown}")
+    if failures:
+        parts.append("\n".join(failures))
+
+    return "\n\n".join(parts) if parts else "⚠️ 沒有成功更新任何檔案。"
+
+
+async def _handle_file_batch(channel_id: str, access_token: str, file_events: list[dict]) -> None:
+    """一次處理同一個 webhook 請求裡收到的所有檔案上傳事件。
+
+    逐一分開回覆的話，一次選取多個檔案上傳會洗出好幾則「正在更新
+    知識庫」跟好幾則「已更新」訊息；這裡改成只顯示一次處理中提示，
+    全部上傳完才合併成一則通知回覆。每個 file event 都各自帶有
+    只能用一次的 reply_token，這裡只用其中一個（最後一個）來回覆
+    合併後的結果，其餘的就讓它自然過期即可，不會有副作用。"""
+    first_source = file_events[0]["source"]
+    source_type = first_source.get("type")
+    target_id = (
+        first_source.get("groupId") or first_source.get("roomId") or first_source.get("userId")
+    )
+    if target_id:
+        await _show_working_indicator(source_type, target_id, access_token, "⏳正在更新知識庫，請稍後")
+
+    results = []
+    for event in file_events:
+        message = event["message"]
+        file_name = message.get("fileName") or "uploaded_file"
+        file_id = message.get("id")
+        results.append(await _process_one_upload(channel_id, access_token, file_id, file_name))
+
+    summary = _summarize_upload_results(results)
+    reply_token = file_events[-1]["replyToken"]
+    try:
+        await reply_text(reply_token, access_token, summary)
+    except Exception as reply_error:
+        logger.error(f"[{channel_id}] Fallback reply also failed: {reply_error}")
+        await notify_admin(
+            f"silent:{channel_id}",
+            f"⚠️ 頻道 {channel_id} 的檔案上傳者完全沒收到任何回覆"
+            f"（fallback 回覆失敗：{reply_error}）",
+        )

@@ -15,6 +15,14 @@ Google 風控清掉，只是比伺服器端純 cookie 的存活期長很多（�
 降低，而不是把人工完全消除：只要這台機器上的瀏覽器本身還維持
 登入，這支腳本就能定期把新鮮的 cookie 續回資料庫。
 
+只有續期失敗時才會發 LINE 通知給管理員——正常運作時完全靜默，
+不會每半小時發一則「一切正常」的訊息來洗版。
+
+讀到的 storage_state.json 內容一旦上傳給後端，本機這份含有
+cookie 的檔案就沒有用處了——會覆寫內容後再刪除（shred，而不是
+單純 os.remove），不讓它在磁碟上多留存。下一輪執行會直接從
+Firefox 重新產生一份新的，不依賴這份殘留的舊檔。
+
 前提條件：
   - 這支腳本要在跟後端同一台機器上執行（本機讀瀏覽器 cookie，
     再打 localhost 的 admin API）
@@ -26,9 +34,13 @@ Google 風控清掉，只是比伺服器端純 cookie 的存活期長很多（�
 用法（手動測試一次）：
     python scripts/nlm_cookie_refresh.py
 
-排定成 Windows 排程工作（例如每 12 小時跑一次）：
-    schtasks /create /tn "NLM Cookie Refresh" /sc hourly /mo 12 ^
+排定成 Windows 排程工作（每半小時跑一次，跟健康檢查同步）：
+    schtasks /create /tn "NLM Cookie Refresh" /sc minute /mo 30 ^
         /tr "python C:\\path\\to\\scripts\\nlm_cookie_refresh.py" /rl highest
+
+排定成 Ubuntu/Linux 的 cron（同樣每半小時跑一次；完整部署步驟見
+docs/ubuntu-cookie-refresh-runbook.md）：
+    */30 * * * * cd /path/to/repo && python3 scripts/nlm_cookie_refresh.py >> /var/log/nlm_cookie_refresh.log 2>&1
 """
 
 import glob
@@ -183,6 +195,24 @@ def rebind_channel(channel_id: str, storage_state: dict) -> str | None:
         return f"{channel_id}: {e}"
 
 
+def _shred_file(path: str) -> None:
+    """覆寫檔案內容後再刪除，而不是單純 os.remove。
+
+    單純刪除只會移除檔案系統的索引項目，內容本身在磁碟上通常還
+    救得回來；覆寫過一次再刪，才是真的把這組 cookie 內容清乾淨，
+    不讓它在本機硬碟上多逗留一秒。這裡只盡力而為——覆寫/刪除
+    失敗只記 log，不影響這次執行的主要結果，也不重新拋出例外。"""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r+b") as f:
+            f.write(os.urandom(size))
+            f.flush()
+            os.fsync(f.fileno())
+        os.remove(path)
+    except Exception as e:
+        log(f"failed to shred {path}: {e}")
+
+
 def main() -> None:
     if not refresh_cookies():
         send_admin_alert(
@@ -209,8 +239,14 @@ def main() -> None:
         with open(path, "r", encoding="utf-8") as f:
             storage_state = json.load(f)
     except Exception as e:
+        _shred_file(path)
         send_admin_alert(f"⚠️ nlm_cookie_refresh：讀取 {path} 失敗：{e}")
         sys.exit(1)
+
+    # 內容已經讀進記憶體、之後只需要 storage_state 這個變數——磁碟上
+    # 那份含有 cookie 的檔案已經沒有用處，不論接下來 rebind 成功或
+    # 失敗都先清掉，不留著。
+    _shred_file(path)
 
     failures = [msg for msg in (rebind_channel(cid, storage_state) for cid in channel_ids) if msg]
 

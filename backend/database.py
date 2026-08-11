@@ -33,8 +33,6 @@ async def init_db():
                 channel_id TEXT NOT NULL,
                 line_user_id TEXT NOT NULL,
                 conversation_id TEXT,
-                drive_folder_id TEXT,
-                drive_folder_link TEXT,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (channel_id, line_user_id)
             )
@@ -47,8 +45,6 @@ async def init_db():
             ("channels", "nlm_health_status", "TEXT"),
             ("invite_codes", "student_name", "TEXT DEFAULT ''"),
             ("invite_codes", "channel_id", "TEXT"),
-            ("user_conversations", "drive_folder_id", "TEXT"),
-            ("user_conversations", "drive_folder_link", "TEXT"),
         ]:
             cur = await db.execute(f"PRAGMA table_info({table})")
             cols = [r[1] for r in await cur.fetchall()]

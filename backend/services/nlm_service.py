@@ -337,7 +337,7 @@ async def check_all_channels_health() -> None:
     也跟著停下來。
 
     通知只在狀態真正從 healthy（或從未檢查過）轉變成 expired 的
-    那一刻發送一次——同一個 channel 持續壞著的話，接下來每 4 小時
+    那一刻發送一次——同一個 channel 持續壞著的話，接下來每半小時
     再檢查到同樣的失敗，不會重複告警，直到它恢復正常、之後又再次
     壞掉為止，才會發出下一次通知。
     """
@@ -409,7 +409,7 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
     追問能帶著先前的上下文。若沒有提供（例如 LINE 不會給匿名
     群組成員一個 id），則每個問題都會獨立提問。
     """
-    from services.text_formatter import format_for_line, build_answer_messages
+    from services.text_formatter import format_for_line, build_answer_messages, citation_numbers_in
 
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
@@ -459,6 +459,20 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
             await _invalidate_client(channel_id)
             client = await _get_cached_client(channel_id, storage_state)
             answer, new_conversation_id, source_map = await _ask(client)
+
+        # NotebookLM 的 references 偶爾會漏給答案文字裡實際用到的某個
+        # 引用編號（source_map 缺一個 key，但文字裡仍出現對應的 [n]）。
+        # 這種殘缺直接拿去做廠商分割，會讓那個編號所屬的整段內容因為
+        # 「查不到廠商」而被誤併入前一個廠商的訊息裡。與其把這種殘缺
+        # 答案送給使用者，先重問一次——同一個問題重問時偶爾成功、
+        # 偶爾失敗，代表這是上游的偶發問題，不是每次都會發生，值得
+        # 賭一次重試。只重試一次，重問後不論是否仍然殘缺都直接採用，
+        # 避免無限重問。
+        if citation_numbers_in(answer) - source_map.keys():
+            try:
+                answer, new_conversation_id, source_map = await _ask(client)
+            except Exception:
+                pass  # 重問失敗就沿用原本（雖然殘缺）的答案，好過整個問題失敗
 
         if line_user_id and new_conversation_id:
             await _save_conversation_id(channel_id, line_user_id, new_conversation_id)

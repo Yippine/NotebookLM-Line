@@ -49,6 +49,23 @@ def test_multi_vendor_splits_into_one_message_per_vendor():
     assert "[2]" not in bmw_msg
 
 
+def test_hyphen_range_citation_is_stripped_and_treated_as_multi_vendor():
+    # NotebookLM 有時會用 "[1-3]" 這種連字號範圍來標記一次引用多個
+    # 來源的句子，而不是逐一列出 "[1, 2, 3]"。這種格式也該被辨識並
+    # 從呈現給使用者的文字中移除。
+    answer = (
+        "目前共有三家廠商的資訊 [1-3]。\n\n"
+        "McLaren 750S 的最大馬力是 750 匹 [1]。\n\n"
+        "BMW M4 的最大馬力是 510 匹 [2]。"
+    )
+    source_map = {1: "McLaren_型錄.md", 2: "BMW_型錄.md", 3: "Audi_型錄.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert not any("[1-3]" in m for m in messages)
+    assert not any("1-3" in m for m in messages)
+
+
 def test_mixed_citation_paragraph_merges_into_preceding_vendor_group():
     answer = (
         "McLaren 750S 的保固是 3 年 [1]。\n\n"

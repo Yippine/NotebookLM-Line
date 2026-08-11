@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -10,9 +11,16 @@ logger = logging.getLogger(__name__)
 # 沒有這個機制的話，若很多學生在幾分鐘內連續碰到同一個壞掉的
 # NotebookLM session，就會每個問題各發一次 LINE push，
 # 而不是每個事件只發一次。
-_COOLDOWN_SECONDS = 600
+_COOLDOWN_SECONDS = 300
 
 _last_sent: dict[str, float] = {}
+
+
+def _admin_user_ids() -> list[str]:
+    """解析 ADMIN_LINE_USER_ID——支援用逗號分隔設定多個人的
+    LINE userId（例如 "Uxxx,Uyyy"），讓告警不是只有一個人收得到。
+    保留原本單一 userId 的寫法也能正常運作（就是長度 1 的清單）。"""
+    return [uid.strip() for uid in settings.admin_line_user_id.split(",") if uid.strip()]
 
 
 async def notify_admin(key: str, message: str, *, cooldown_seconds: float | None = None) -> None:
@@ -33,7 +41,8 @@ async def notify_admin(key: str, message: str, *, cooldown_seconds: float | None
     ——不然兩套各自獨立的防重複機制疊在一起，反而可能讓一個
     真正的新事件被這裡的時間冷卻擋下來。
     """
-    if not settings.admin_line_user_id or not settings.admin_alert_access_token:
+    user_ids = _admin_user_ids()
+    if not user_ids or not settings.admin_alert_access_token:
         return
 
     window = _COOLDOWN_SECONDS if cooldown_seconds is None else cooldown_seconds
@@ -45,13 +54,18 @@ async def notify_admin(key: str, message: str, *, cooldown_seconds: float | None
     # 都會通過上面的冷卻檢查，各自發出自己的告警；而且一旦 LINE API
     # 發生中斷，每一次後續失敗都會變成立即重試，而不是像真正成功
     # 時那樣進入冷卻視窗等待。
-    _last_sent[key] = now 
+    _last_sent[key] = now
 
-    try:
-        await push_text(settings.admin_line_user_id, settings.admin_alert_access_token, message)
-    except Exception as e:
-        # 告警是盡力而為：這裡選擇記錄並吞掉例外，而不是往外拋出，
-        # 因為這個函式總是從另一個操作的錯誤處理路徑中被呼叫——
-        # 若讓一個壞掉的告警路徑在這裡拋出例外，會用一個無關的錯誤
-        # 蓋掉那個操作原本真正的錯誤。
-        logger.error(f"Failed to send admin alert (key={key}): {e}")
+    # 每個收件人各自 push、彼此獨立——其中一個人已經退出好友或
+    # token 有問題導致失敗，不該連帶讓其他人也收不到這則告警。
+    results = await asyncio.gather(
+        *(push_text(uid, settings.admin_alert_access_token, message) for uid in user_ids),
+        return_exceptions=True,
+    )
+    for uid, result in zip(user_ids, results):
+        if isinstance(result, BaseException):
+            # 告警是盡力而為：這裡選擇記錄並吞掉例外，而不是往外拋出，
+            # 因為這個函式總是從另一個操作的錯誤處理路徑中被呼叫——
+            # 若讓一個壞掉的告警路徑在這裡拋出例外，會用一個無關的錯誤
+            # 蓋掉那個操作原本真正的錯誤。
+            logger.error(f"Failed to send admin alert to {uid} (key={key}): {result}")

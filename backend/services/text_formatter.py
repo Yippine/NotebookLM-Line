@@ -12,7 +12,8 @@ def format_for_line(text: str) -> str:
     return text.strip()
 
 
-_CITATION_GROUP_RE = re.compile(r"\[([\d,\s]+)\]")
+_CITATION_GROUP_RE = re.compile(r"\[([\d,\s\-]+)\]")
+_CITATION_RANGE_RE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n")
 _BULLET_LINE_RE = re.compile(r"^(?:[•\-*]|\d+[.\)])\s+")
 
@@ -20,7 +21,7 @@ _BULLET_LINE_RE = re.compile(r"^(?:[•\-*]|\d+[.\)])\s+")
 _TRAILING_DATE_RE = re.compile(r"\d{8}$")
 
 
-def _vendor_from_title(title: str) -> str:
+def vendor_from_title(title: str) -> str:
     """從來源的檔名中擷取廠商名稱。
 
     目前的命名慣例是 `{廠商}{西元年月日}`，中間不加分隔符
@@ -51,12 +52,30 @@ def _citation_numbers_in(text: str) -> set[int]:
             piece = piece.strip()
             if piece.isdigit():
                 numbers.add(int(piece))
+                continue
+            range_match = _CITATION_RANGE_RE.match(piece)
+            if range_match:
+                start, end = int(range_match.group(1)), int(range_match.group(2))
+                if start <= end:
+                    numbers.update(range(start, end + 1))
     return numbers
 
 
+def citation_numbers_in(text: str) -> set[int]:
+    """回傳文字中出現過的所有引用編號（例如 "[1]"、"[1, 2]" 或
+    "[1-3]" 裡的 1、2、3）。
+
+    公開給 nlm_service 使用，讓它能在送出答案前，檢查 NotebookLM
+    回傳的 references 是否漏掉了答案文字裡實際引用到的某個編號
+    ——這種上游缺漏會讓 `build_answer_messages` 把查無廠商的段落
+    誤併入前一個廠商的訊息裡。
+    """
+    return _citation_numbers_in(text)
+
+
 def _strip_citations(text: str) -> str:
-    """移除像 [1] 或 [1, 2] 這樣的引用標記——因為呈現給使用者的內容
-    中沒有任何說明能解釋它們指的是什麼，留著只會是雜訊。"""
+    """移除像 [1]、[1, 2] 或 [1-3] 這樣的引用標記——因為呈現給使用者
+    的內容中沒有任何說明能解釋它們指的是什麼，留著只會是雜訊。"""
     text = _CITATION_GROUP_RE.sub("", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
@@ -194,7 +213,7 @@ _NO_VENDOR_MATCH_REPLY = "很抱歉，目前的資料無法明確對應到特定
 def build_answer_messages(text: str, source_map: dict[int, str]) -> list[str]:
     """為一則回答建立 LINE 訊息，每個廠商各一則。
 
-    每個段落會被歸屬到它所引用的單一廠商（見 `_vendor_from_title`），
+    每個段落會被歸屬到它所引用的單一廠商（見 `vendor_from_title`），
     並加上「【廠商】」標題，讓使用者一眼就能看出哪些廠商有相符的
     資訊——不會另外附上來源清單。若有多個廠商都有相符資訊，
     則各自成一則訊息。沒有引用來源、或引用了不只一個廠商的
@@ -208,7 +227,7 @@ def build_answer_messages(text: str, source_map: dict[int, str]) -> list[str]:
         return []
 
     cited_numbers = _citation_numbers_in(text) & source_map.keys()
-    citation_vendor = {n: _vendor_from_title(source_map[n]) for n in cited_numbers}
+    citation_vendor = {n: vendor_from_title(source_map[n]) for n in cited_numbers}
 
     parts = [_strip_citations(part) for part in _split_by_vendor(text, citation_vendor)]
     messages = [part for part in parts if not part.startswith(_UNCLASSIFIED_HEADER)]

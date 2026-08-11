@@ -45,23 +45,8 @@ async def expiry_scheduler():
         await asyncio.sleep(60)
 
 
-async def conversation_retention_scheduler():
-    """背景任務：每天清除超過保留期限的對話紀錄（追蹤表的列與
-    Drive 上的問答檔案）。"""
-    from services import google_log_service
-
-    while True:
-        try:
-            result = await google_log_service.cleanup_old_conversation_records()
-            if result["deleted_rows"] or result["deleted_files"]:
-                logger.info(f"Conversation retention cleanup: {result}")
-        except Exception as e:
-            logger.error(f"Conversation retention cleanup error: {e}")
-        await asyncio.sleep(24 * 60 * 60)
-
-
 async def nlm_health_scheduler():
-    """背景任務：每隔幾個小時主動探測每個已綁定 channel 的 NotebookLM
+    """背景任務：每半小時主動探測每個已綁定 channel 的 NotebookLM
     session，讓失效的登入 cookie 能在學生的提問碰到它之前
     就被發現並發出告警。"""
     from services.nlm_service import check_all_channels_health
@@ -71,18 +56,16 @@ async def nlm_health_scheduler():
             await check_all_channels_health()
         except Exception as e:
             logger.error(f"NotebookLM health check error: {e}")
-        await asyncio.sleep(4 * 60 * 60)
+        await asyncio.sleep(30 * 60)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     expiry_task = asyncio.create_task(expiry_scheduler())
-    retention_task = asyncio.create_task(conversation_retention_scheduler())
     nlm_health_task = asyncio.create_task(nlm_health_scheduler())
     yield
     expiry_task.cancel()
-    retention_task.cancel()
     nlm_health_task.cancel()
     from services.line_service import aclose_client
     from services.nlm_service import aclose_all_clients
