@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import logging.handlers
 from datetime import datetime, timezone
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -9,9 +11,29 @@ from database import init_db, DB
 import aiosqlite
 import os
 
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+# `docker logs` 只保留「當前這個容器實例」的輸出——容器一旦被重新
+# 建立（不管是手動部署、還是機器睡眠喚醒後 Docker Desktop 重啟
+# 容器），前面的紀錄就整個消失，2026-08-11/12 好幾次事後追查都因此
+# 卡住。額外把 log 寫進一份會隨每日輪替、但保留歷史的檔案，放在
+# 跟 DB 同一個目錄下（也就是 docker-compose.yml 掛的 ./data volume，
+# 不會隨容器重建而消失）。StreamHandler 仍然保留，`docker logs`
+# 即時查看的體驗不受影響，這只是多一份不會消失的副本。
+_log_dir = Path(DB).parent / "logs"
+_log_dir.mkdir(parents=True, exist_ok=True)
+_file_handler = logging.handlers.TimedRotatingFileHandler(
+    _log_dir / "backend.log",
+    when="midnight",
+    backupCount=30,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    format=_LOG_FORMAT,
+    handlers=[logging.StreamHandler(), _file_handler],
 )
 logger = logging.getLogger(__name__)
 
