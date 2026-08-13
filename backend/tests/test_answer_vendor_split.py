@@ -1,4 +1,4 @@
-from services.text_formatter import build_answer_messages
+from services.text_formatter import build_answer_messages, count_unclassified_drops
 
 
 def test_single_vendor_gets_one_labeled_message_with_no_citation_markers():
@@ -102,6 +102,26 @@ def test_all_unclassified_falls_back_to_apology_instead_of_silence():
     assert len(messages) == 1
     assert "未分類" not in messages[0]
     assert "廠牌" in messages[0]  # 這是備援的致歉訊息，而不是被悄悄丟棄
+
+
+def test_count_unclassified_drops_reports_how_much_content_was_discarded():
+    """`count_unclassified_drops` 讓呼叫端能知道「未分類」捨棄了幾段——
+    這種捨棄使用者完全無感，沒有這個訊號就不會被發現。"""
+    answer = "車輛的保固期是 3 年 [1]。\n\n特殊活動的折扣期限是本月底 [2]。"
+
+    # 一段可歸屬、一段不可歸屬（notes.md 沒有廠商前綴）——只丟棄那一段。
+    mixed_source_map = {1: "McLaren_型錄.md", 2: "notes.md"}
+    assert count_unclassified_drops(answer, mixed_source_map) == 1
+
+    # 兩段都不可歸屬——兩者都會被歸到同一個「未分類」桶（因為
+    # `vendor_from_title` 對兩個檔名都回傳同一個字串「未分類」），
+    # 合併成一段被捨棄，而不是兩段各自獨立被丟棄。
+    all_unclassified_source_map = {1: "notes.md", 2: "misc.md"}
+    assert count_unclassified_drops(answer, all_unclassified_source_map) == 1
+
+    # 完全沒有未分類內容時，不該誤報。
+    clean_source_map = {1: "McLaren_型錄.md", 2: "BMW_型錄.md"}
+    assert count_unclassified_drops(answer, clean_source_map) == 0
 
 
 def test_interleaved_bullet_list_still_splits_cleanly_by_vendor():

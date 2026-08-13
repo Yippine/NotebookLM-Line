@@ -4,6 +4,7 @@ import os
 import asyncio
 import mimetypes
 import tempfile
+import time
 from pathlib import Path
 from notebooklm import NotebookLMClient, ChatGoal
 from markitdown import MarkItDownException
@@ -91,6 +92,37 @@ _sources_cache: dict[str, list] = {}
 def _invalidate_sources_cache(notebook_id: str) -> None:
     _sources_cache.pop(notebook_id, None)
 
+
+# 針對「完全相同問題文字」的短時間答案快取，以 (channel_id, 問題文字)
+# 為 key。同一個問題重問 NotebookLM，生成時間本身就有很大的變異
+# （實測同一句話問兩次，一次 191 秒、一次 48 秒），群組裡又常常有
+# 好幾個人各自問到類似或完全相同的問題（例如「你們家有現車嗎」）
+# ——與其每次都重新付出這個生成成本，短時間內完全相同的問題直接
+# 回傳上一次的答案。只在「這次提問沒有延續任何既有對話」時才使用
+# 快取（見 ask_question 裡 conversation_id is None 的判斷）：一旦是
+# 延續某個使用者自己對話串的追問，答案就跟那個人前面問過什麼有關，
+# 不能被別人的、或這個人自己更早、不相干的快取答案取代。
+_ANSWER_CACHE_TTL_SECONDS = 300
+_answer_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+
+
+def _get_cached_answer(channel_id: str, question: str) -> list[str] | None:
+    key = (channel_id, question.strip())
+    cached = _answer_cache.get(key)
+    if cached is None:
+        return None
+    expires_at, messages = cached
+    if time.time() >= expires_at:
+        _answer_cache.pop(key, None)
+        return None
+    return messages
+
+
+def _save_cached_answer(channel_id: str, question: str, messages: list[str]) -> None:
+    key = (channel_id, question.strip())
+    _answer_cache[key] = (time.time() + _ANSWER_CACHE_TTL_SECONDS, messages)
+
+
 # 這是在 NotebookLM 筆記本層級強制執行的優先指令（不只是
 # routers/webhook.py 中 LINE 端的關鍵字過濾），讓模型本身即使在
 # 問題沒有比對到關鍵字清單時，也會主動拒答這些主題。
@@ -103,7 +135,45 @@ RESTRICTED_TOPIC_CUSTOM_PROMPT = (
     "不可拒答：詢問車輛規格、配備、功能、性能等技術資訊；詢問是否有特定年份、車型、"
     "顏色的現車或庫存；詢問展示中心、服務據點、保固、保養等一般諮詢。\n"
     "只有在確定使用者的核心意圖就是交易本身時，才只回覆：「本機器人僅供諮詢用途，"
-    "不可以回答有關交易、買賣、授權、承諾等事宜。」"
+    "不可以回答有關交易、買賣、授權、承諾等事宜。」\n"
+    "回答結尾如果想主動提供進一步協助，不要用「需要我...嗎？」「要不要我幫你...？」"
+    "這種只能回「好」或「不用」的是非題來問——這個機器人是在 LINE 群組裡運作，"
+    "使用者若只回覆「好」這種不含任何車輛相關字詞的單字，系統不會辨識為有效訊息、"
+    "也就不會真的傳到你這裡，等於使用者對著空氣回答，得不到任何後續回應。如果想建議"
+    "延伸資訊，請改成直接附上內容，或是提示使用者用具體的車型、廠牌重新提問"
+    "（例如：「如果想比較 Altis 與 Corolla Cross 的差異，歡迎直接告訴我」），"
+    "不要用開放式的是非題結尾。\n"
+    "當使用者要求比較多個車型、或整理跨多個廠商來源的資訊時，請一律使用 Markdown "
+    "表格呈現（列標籤放比較項目，欄位放各車型/廠商），不要用「1. 2. 3.」編號段落"
+    "搭配條列項目的方式呈現——這個系統會依照每段內容引用的來源自動分成不同廠商的"
+    "訊息，編號段落底下的條列項目如果分別引用不同廠商，會被拆散到不同訊息裡，"
+    "導致段落標題和內容各自散落、無法閱讀；Markdown 表格則會被完整保留、不會被拆散。\n"
+    "表格的欄位名稱（廠商/車商那一列）一定要用來源中記載的真實全名"
+    "（例如「中彰投汽車有限公司」「正峰汽車商行」），絕對不可以為了讓表格看起來"
+    "簡潔，而簡化成「車商 A」「車商 B」「經銷商1」這種匿名化的代稱——這個機器人存在"
+    "的目的就是要讓使用者知道哪一家真實的廠商有他要的車，用代稱會讓使用者完全無法"
+    "知道要去哪裡找車，即使廠商全名很長、欄位變得比較寬也一樣要用全名。\n"
+    "只要一則回答會需要同時引用 4 家以上廠商的來源資料，不論使用者的提問是完全"
+    "沒有指定條件（例如「有哪些現車」），還是已經指定了廠牌、顏色、里程等條件、"
+    "只是篩選結果剛好分散在 4 家以上廠商（例如「各家豐田車的價格差異」「我要跑很遠"
+    "的、白色的」這類問題），都算數，以下是硬性規定，優先順序高於「盡可能完整回答"
+    "使用者問題」這個一般傾向：\n"
+    "1. 只能用一個簡短表格列出「廠商名稱」加上「符合條件的台數」，最多再加一項"
+    "最關鍵的重點欄位（例如平均或最低價格），表格總欄位數不可超過 3 欄。\n"
+    "2. 絕對不要在同一則回答裡展開列出每一台車輛的完整規格明細，也不要每個廠商"
+    "各自列出配備、里程、年份等多個維度的完整比較。\n"
+    "3. 回答結尾一定要主動詢問使用者想先深入了解哪一家廠商或哪一款車，再針對"
+    "縮小後的範圍提供詳細資訊，不要一次把所有細節都生成出來。\n"
+    "會有這條規定，是因為這類跨 4 家以上廠商的完整表格需要逐一比對大量資料，"
+    "生成常常要 3-5 分鐘以上，使用者在 LINE 上等待體驗會很差——寧可先給精簡總覽、"
+    "之後再追問，也不要一次生成涵蓋所有廠商細節的完整報告。\n"
+    "文字敘述中每提到一次廠商名稱（例如「由『某某汽車』提供」「僅有一台，"
+    "由...」），都必須跟緊接在後面的引用編號 [n] 實際對應的來源一致，"
+    "不可以憑印象把資料寫成另一家廠商——尤其是「符合條件的僅有一台」"
+    "「唯一一台」這類只鎖定單一結果的回答，公布廠商名稱之前務必重新核對"
+    "該筆資料真正引用的來源是哪一份文件，寧可多花一點時間核對，也不可以"
+    "讓廠商名稱跟實際引用的來源不符——這種錯誤會讓使用者聯繫錯誤的車商，"
+    "比回答慢一點嚴重得多。"
 )
 
 
@@ -400,6 +470,17 @@ async def _save_conversation_id(channel_id: str, line_user_id: str, conversation
         await db.commit()
 
 
+# notebooklm-py 在偵測到登入 session 已失效時，固定會拋出這個訊息的
+# ValueError（見該套件 `_auth/refresh.py`），不是它自訂的例外類型，
+# 所以只能比對訊息文字。cookie 失效目前還會不定期發生，在修好之前
+# 不該讓使用者看到這種內部技術訊息。
+_AUTH_FAILURE_SIGNATURE = "Authentication expired or invalid"
+_AUTH_FAILURE_USER_REPLY = (
+    "不好意思，系統目前登入狀態異常，暫時無法查詢車輛資訊，"
+    "我們已經在處理中，請稍後再試一次 🙏"
+)
+
+
 async def ask_question(channel_id: str, question: str, line_user_id: str | None = None) -> list[str]:
     """載入該 channel 的 cookie，向 NotebookLM 提問，並回傳可直接
     用於 LINE 的答案訊息。
@@ -409,7 +490,13 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
     追問能帶著先前的上下文。若沒有提供（例如 LINE 不會給匿名
     群組成員一個 id），則每個問題都會獨立提問。
     """
-    from services.text_formatter import format_for_line, build_answer_messages, citation_numbers_in
+    from services.text_formatter import (
+        format_for_line,
+        build_answer_messages,
+        citation_numbers_in,
+        count_unclassified_drops,
+        vendor_from_title,
+    )
 
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
@@ -428,9 +515,22 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
     conversation_id = (
         await _get_conversation_id(channel_id, line_user_id) if line_user_id else None
     )
+    logger.info(
+        f"[{channel_id}] user={line_user_id!r} 這次提問帶入的 conversation_id={conversation_id!r}"
+    )
+
+    if conversation_id is None:
+        cached = _get_cached_answer(channel_id, question)
+        if cached is not None:
+            logger.info(f"[{channel_id}] 命中答案快取，不重新查詢 NotebookLM：{question!r}")
+            return cached
 
     async def _ask(client):
         result = await client.chat.ask(notebook_id, question, conversation_id=conversation_id)
+        logger.info(
+            f"[{channel_id}] user={line_user_id!r} NotebookLM 回傳延續用的 "
+            f"conversation_id={result.conversation_id!r}"
+        )
         # 建立 source_id → title 的對照表
         source_map = {}
         if result.references:
@@ -476,11 +576,46 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
 
         if line_user_id and new_conversation_id:
             await _save_conversation_id(channel_id, line_user_id, new_conversation_id)
-        return build_answer_messages(format_for_line(answer), source_map)
+
+        # 用「這個筆記本全部來源檔名」反推出的廠商名單，而不是只看
+        # 這則答案實際引用到的那幾個——真實發生過模型寫錯的廠商名稱
+        # 剛好是這則答案完全沒有引用到的另一家廠商，只看 source_map
+        # 的話，連辨識出「這是一個已知廠商名稱、只是寫錯地方了」都
+        # 做不到。sources_cache 通常已經有值（前面 _ask 只要 references
+        # 非空就會填入）；萬一這次答案完全沒有引用來源，就退回空集合，
+        # 訂正函式在沒有已知廠商名單時本來就是無害的無動作。
+        all_sources = _sources_cache.get(notebook_id) or []
+        known_vendors = {vendor_from_title(s.title) for s in all_sources}
+
+        formatted = format_for_line(answer)
+        dropped = count_unclassified_drops(formatted, source_map, known_vendors)
+        if dropped:
+            # 使用者收到的答案就只是「少了一段」，完全沒有跡象顯示曾經
+            # 有內容被拿掉——常見原因是有新上傳的知識庫來源檔名不符合
+            # 「{廠商}_{日期}」命名慣例，導致內容查不到廠商而被捨棄。
+            # 沒有這則告警的話，這種資料品質問題只能靠使用者自己發現
+            # 答案怪怪的、再回報出來才會被注意到。
+            await notify_admin(
+                f"unclassified-drop:{channel_id}",
+                f"⚠️ 頻道 {channel_id} 的回答中有 {dropped} 段內容因來源檔名無法歸屬到"
+                "任何廠商（未分類）而被捨棄、未送給使用者。常見原因是有新上傳的知識庫"
+                "來源檔名不符合「{廠商}_{日期}」命名慣例，請檢查最近上傳的來源檔名。",
+            )
+        messages = build_answer_messages(formatted, source_map, known_vendors)
+        if conversation_id is None:
+            _save_cached_answer(channel_id, question, messages)
+        return messages
     except Exception as e:
         await notify_admin(
             f"nlm:{channel_id}",
             f"⚠️ NotebookLM 查詢失敗（頻道 {channel_id}）：{e}\n"
             "常見原因是登入 cookie 失效，請確認是否需要重新 notebooklm login。",
         )
+        if _AUTH_FAILURE_SIGNATURE in str(e):
+            # cookie 失效目前還會不定期發生（管理員通常幾分鐘內就會手動
+            # 重新登入修復），但在修好之前，使用者不該看到
+            # 「Authentication expired or invalid...Run 'notebooklm login'」
+            # 這種內部技術訊息——用罐頭訊息頂著，管理員那邊還是照樣
+            # 會收到上面完整的原始錯誤，不影響除錯。
+            return [_AUTH_FAILURE_USER_REPLY]
         return [f"⚠️ 查詢失敗：{e}"]
