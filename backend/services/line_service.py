@@ -52,14 +52,20 @@ def _build_messages(texts: list[str]) -> list[dict]:
 
 
 async def show_loading(user_id: str, access_token: str, seconds: int = 20) -> bool:
-    """顯示 LINE 的載入動畫。成功則回傳 True。"""
+    """顯示 LINE 的載入動畫。成功則回傳 True。
+
+    這個端點實測會回傳 202（配空的 ``{}``），不是像大多數 Messaging
+    API 端點那樣回 200——202 代表「請求已受理、動畫非同步顯示中」，
+    是這個端點正常的成功回應，不是錯誤，所以接受整個 2xx 範圍，
+    而不是只認 200（只認 200 會讓每一次成功呼叫都被誤判成失敗）。
+    """
     client = _get_client()
     resp = await client.post(
-        "https://api.line.me/v2/bot/chat/loading",
+        "https://api.line.me/v2/bot/chat/loading/start",
         headers=_headers(access_token),
         json={"chatId": user_id, "loadingSeconds": min(seconds, 60)},
     )
-    if resp.status_code != 200:
+    if not (200 <= resp.status_code < 300):
         logger.warning(f"Loading animation failed: {resp.status_code} {resp.text}")
         return False
     return True
