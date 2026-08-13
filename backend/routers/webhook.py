@@ -98,7 +98,20 @@ _CAR_RELATED_KEYWORDS = (
     "豐田", "雷克薩斯", "本田", "日產", "馬自達", "三菱", "鈴木", "速霸陸",
     "福特", "現代", "起亞", "福斯", "奧迪", "寶馬", "賓士", "朋馳", "富豪",
     "標緻", "斯柯達", "特斯拉", "納智捷", "裕隆", "中華",
+    # 常見車型名稱——使用者很自然會直接用車型代號發問（例如「CRV多少錢」），
+    # 完全不提廠牌或任何上面的通用字詞；這份清單無法窮舉所有車型
+    # （知識庫日後可能匯入清單外的車型），只能盡量涵蓋現有庫存與市場
+    # 常見的名稱，跟下面 `_MODEL_CODE_RE` 的全大寫代號比對互補。
+    "X-Trail", "Corolla", "Altis", "Camry", "Yaris", "Vios", "Sienta",
+    "Wish", "Premio", "Auris", "Prius", "Innova", "Golf", "Tiguan",
+    "Focus", "Ranger", "Kicks", "Livina", "Outlander", "Delica",
+    "Tucson", "Elantra", "Sportage", "Sorento", "Kona",
 )
+
+# 車型代號常見用全大寫英文表示（CRV、SUV、RAV4、EV6、ABS、GTI...），
+# 使用者只打代號、不帶廠牌或任何通用字詞發問是很常見的情況——這條
+# 規則跟上面的關鍵字清單互補，不要求窮舉每一個車型名稱。
+_MODEL_CODE_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,}[A-Z0-9]*(?![a-z])")
 
 
 def _is_car_related_question(text: str) -> bool:
@@ -111,6 +124,8 @@ def _is_car_related_question(text: str) -> bool:
     而不只是單純的關鍵字清單。
     """
     if any(keyword in text for keyword in _CAR_RELATED_KEYWORDS):
+        return True
+    if _MODEL_CODE_RE.search(text):
         return True
     return classify_restricted_topic(text) is not None
 
