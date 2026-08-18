@@ -6,10 +6,32 @@ logger = logging.getLogger(__name__)
 
 
 _TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+# NotebookLM 在使用者觸發它的網路搜尋功能（例如問跟車輛完全無關的
+# 天氣、新聞）時，回答裡有時會附帶一段 `<a2ui-json>...</a2ui-json>`
+# ——這是它網頁版用來顯示「可匯入來源卡片」的內部 UI 元件描述
+# （真實發生過的案例：一大包含 base64 下載網址的原始 JSON），
+# 對 LINE 純文字訊息完全沒有意義，原封不動送出去只會是一大坨
+# 看不懂的亂碼，必須整段拿掉。
+_A2UI_JSON_RE = re.compile(r"<a2ui-json>.*?</a2ui-json>", re.DOTALL | re.IGNORECASE)
 _BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _LI_OPEN_RE = re.compile(r"<li>", re.IGNORECASE)
 _LIST_TAG_RE = re.compile(r"</?(?:ul|ol|li)>", re.IGNORECASE)
 _LEADING_BULLET_RE = re.compile(r"^(?:[•\-*]|\d+[.\)])\s+")
+
+# 表格轉換時，列與列之間的預設分隔——見 `_convert_markdown_tables`
+# 與 `_promote_unambiguous_row_separators_to_paragraph_breaks` 的說明。
+#
+# 用兩種不同的分隔字串記住「這些列在轉換當下，第一欄本來就已經是
+# 逐列變化的真實實體（例如廠商名稱、車輛型號），還是通用、會重複
+# 出現的比較項目（例如「年份」「顏色」這種欄名）」——這個區分只有
+# `_convert_markdown_tables` 當下知道（`collapse_first_col` 是否
+# 成立），之後 `_promote_unambiguous_row_separators_to_paragraph_
+# breaks` 沒辦法單靠文字內容重新推算出來，所以用不同的分隔字串
+# 直接把這個資訊帶過去：已經是逐列變化實體的表格，永遠不該再被
+# 誤判成「其實該逐欄分組」，否則會把已經正確的「一列一台車」拆散
+# 成「一欄一個規格項目」。
+_ROW_SEPARATOR = "－－－－－"
+_ENTITY_ROW_SEPARATOR = "－－－●－－－"
 
 
 def _split_table_row(line: str) -> list[str]:
@@ -19,6 +41,28 @@ def _split_table_row(line: str) -> list[str]:
     if line.endswith("|"):
         line = line[:-1]
     return [cell.strip() for cell in line.split("|")]
+
+
+def _clean_table_header_cell(cell: str) -> str:
+    """整理表格「欄位名稱」（表頭那一列的儲存格），攤平成單行文字，
+    供 ``f"{col_name}：{cell}"`` 當欄位名稱前綴用。
+
+    跟 `_clean_table_cell`（給*儲存格內容*用，允許 <br> 轉成真正的
+    換行，呈現多行子項目）刻意不同——欄位名稱一定要維持單行：這裡
+    產生的文字這時候還沒經過 `format_for_line` 的 `<br>` → 換行轉換，
+    如果放著不處理，等那一步跑完，「欄位名稱：值」這一整行就會被
+    從 <br> 的位置攔腰切成兩行，前半段（通常是車型名稱）沒有「：」、
+    在逐列解析（`_parse_row_major_table_block`）時會被直接丟棄，只
+    剩後半段被當成欄位名稱——如果兩欄的後半段文字剛好相同（例如
+    同一家廠商的兩台車，後半段都只剩「（廠商 [1]）」），兩欄就會被
+    誤判成同一欄，轉置時其中一欄的整排資料會被另一欄悄悄蓋掉、憑空
+    消失（真實發生過的案例：同一家廠商有兩台車時，比較表轉置後只
+    剩其中一台車的資料，使用者完全看不出少了什麼）。"""
+    cell = _BR_TAG_RE.sub(" ", cell)
+    cell = _LIST_TAG_RE.sub("", cell)
+    cell = re.sub(r"\*\*(.+?)\*\*", r"\1", cell)
+    cell = re.sub(r"\s+", " ", cell)
+    return cell.strip()
 
 
 def _clean_table_cell(cell: str) -> str:
@@ -98,17 +142,99 @@ def _convert_markdown_tables(text: str) -> str:
             first_col_values = {_clean_table_cell(row[0]) for row in rows if row and row[0]}
             collapse_first_col = len(header) > 2 and len(rows) > 1 and len(first_col_values) == 1
             label_col = 1 if collapse_first_col else 0
+            # 用不同的分隔字串記住這一點，供
+            # `_promote_unambiguous_row_separators_to_paragraph_breaks`
+            # 判斷要不要嘗試改成逐欄分組——`collapse_first_col` 成立時，
+            # 每一列的標籤已經是逐列變化的真實實體（例如廠牌／車型），
+            # 不該再被誤判成「其實該逐欄分組」，見該常數的說明。
+            row_separator = _ENTITY_ROW_SEPARATOR if collapse_first_col else _ROW_SEPARATOR
 
             block: list[str] = []
-            for row in rows:
-                if len(row) > label_col and row[label_col]:
-                    # 標籤這裡刻意保留引用標記（不在這裡先清掉）——
-                    # `_correct_vendor_citation_mismatches` 需要標籤緊接著
-                    # 自己的引用編號才能找到、訂正寫錯的廠商名稱；標記
-                    # 本身會在 `_strip_citations` 那一步統一清掉，順便
-                    # 收掉因此留下的多餘空格（見該函式）。
-                    block.append(f"【{_clean_table_cell(row[label_col])}】")
+
+            if single_data_col:
+                # 只有一欄資料時，這一欄的欄位名稱（`header[1]`）有兩種
+                # 可能：可能就是廠商名稱本身（例如「| 比較項目 | 正峰
+                # 汽車商行 |」，這時候逐行重複印出來是雜訊，見上面的
+                # 說明），也可能是這一欄實際代表的車型／車款名稱（例如
+                # 「| 比較項目 | A180 1.3 運動版 |」，只有一家廠商符合
+                # 條件、但表格本身其實是拿來對照某一款特定車型的規格）
+                # ——這裡不預先判斷是哪一種，先把它當成一行「車型：」
+                # 資訊留著；如果它剛好等於這則訊息最後解析出來的廠商
+                # 名稱，`_redundant_vendor_value_line_re` 會在稍後自動
+                # 把這行拿掉，兩種情況都能正確處理，不需要在這裡先
+                # 判斷、也判斷不出來（這裡還不知道引用編號對應到哪個
+                # 廠商）。
+                #
+                # 如果表格本身已經有一列的標籤就叫「車型」（或近似
+                # 說法），代表車型資訊已經包含在表格內容裡了，這裡就
+                # 不用再多加一行——不但是多餘的，這一欄的欄位名稱有時
+                # 其實是模型記錯、寫成別家廠商名稱的幻覺內容（真實發生
+                # 過的案例），硬是掛上「車型：」這個標籤反而會誤導；
+                # 表格裡真正的「車型」那一列本身就更可靠。
+                existing_row_labels = {_clean_table_cell(row[0]) for row in rows if row and row[0]}
+                col_header = header[1] if len(header) > 1 else ""
+                col_header = _clean_table_cell(col_header)
+                if (
+                    col_header
+                    and _CITATION_GROUP_RE.sub("", col_header).strip()
+                    and not existing_row_labels & {"車型", "車款", "型號"}
+                ):
+                    block.append(f"車型：{col_header}")
+            for row_idx, row in enumerate(rows):
+                if row_idx > 0 or block:
+                    # 這一列前面已經有內容了（前一列，或是上面加的
+                    # 「車型：」那一行）——一定要放分隔線把它們隔開，
+                    # 否則兩段內容會被直接黏在同一行裡，稍後解析表格
+                    # 結構時會被誤判成同一「列」貢獻了好幾個不同的
+                    # 欄位名稱，讓本來不該轉置的表格被誤判成可以轉置
+                    # （這是實際發生過的真實案例）。
+                    # 每一列之間留一個視覺分隔——但預設刻意不是「空行」：
+                    # `_atoms_in` 是依空行把文字切成不同段落，每個段落各自
+                    # 變成獨立的原子；如果這張表其實是「比較表」（同一列
+                    # 裡不同儲存格分別引用不同廠商，例如比較兩款車在不同
+                    # 廠商的規格），用空行分隔會被拆成好幾個原子，內容
+                    # 各自散落到不同廠商的訊息氣泡裡（這是這個表格轉換
+                    # 機制一開始就要避免的下場）。所以這裡先一律用分隔線
+                    # 頂著——它在視覺上有分隔效果，但不會被判斷成空行、
+                    # 也不會被 `_BULLET_LINE_RE`（只認半形符號）誤判成
+                    # 項目符號，此時整張表格仍是同一個原子。
+                    #
+                    # 之後 `_promote_unambiguous_row_separators_to_paragraph_
+                    # breaks` 會在真正知道每個引用編號對應到哪個廠商之後
+                    # （這裡還不知道），回頭判斷是否要把這裡先放的分隔線
+                    # 換成真正的段落空行，讓內容各自拆成獨立的訊息氣泡；
+                    # 見該函式的說明。
+                    block.append(row_separator)
+
+                row_label = (
+                    _clean_table_cell(row[label_col])
+                    if len(row) > label_col and row[label_col]
+                    else None
+                )
+                # 標籤這裡刻意保留引用標記（不在這裡先清掉）——
+                # `_correct_vendor_citation_mismatches` 需要標籤緊接著
+                # 自己的引用編號才能找到、訂正寫錯的廠商名稱；標記
+                # 本身會在 `_strip_citations` 那一步統一清掉，順便
+                # 收掉因此留下的多餘空格（見該函式）。
+                #
+                # 只有一欄資料時（`single_data_col`），統一用「屬性：值」
+                # 單行格式（跟多欄、或轉置後的格式一致），而不是
+                # 「【屬性】」括號單獨一行、值另起一行——這樣才能讓後續
+                # `_redundant_vendor_value_line_re` 正確辨識並拿掉「來源
+                # 車商：某某廠商」這種整行剛好等於廠商名稱的重複欄位，
+                # 而且跟其他情況的呈現方式一致，不會有兩套不同的格式。
+                if not single_data_col and row_label:
+                    block.append(f"【{row_label}】")
+
                 for col_name, cell in zip(header[label_col + 1 :], row[label_col + 1 :]):
+                    # 欄位名稱在這裡就要攤平成單行（見
+                    # `_clean_table_header_cell` 的說明），不能沿用
+                    # `_clean_table_cell` 那種允許 <br> 變成真正換行的
+                    # 處理方式——欄位名稱要接在同一行的「：」前面，
+                    # 一旦被換行斷成兩截，後面的逐列解析會把沒有「：」
+                    # 的那一截整個丟棄，導致不同欄位可能撞名、其中一欄
+                    # 資料被靜默蓋掉。
+                    col_name = _clean_table_header_cell(col_name)
                     cell = _clean_table_cell(cell)
                     if not cell:
                         continue
@@ -128,7 +254,10 @@ def _convert_markdown_tables(text: str) -> str:
                         else:
                             block.append(cell)
                         continue
-                    block.append(cell if single_data_col else f"{col_name}：{cell}")
+                    if single_data_col:
+                        block.append(f"{row_label}：{cell}" if row_label else cell)
+                    else:
+                        block.append(f"{col_name}：{cell}")
             out.append("\n".join(block))
             continue
         out.append(line)
@@ -138,6 +267,7 @@ def _convert_markdown_tables(text: str) -> str:
 
 def format_for_line(text: str) -> str:
     """將 NotebookLM 的 markdown 輸出轉換成適合 LINE 顯示的純文字。"""
+    text = _A2UI_JSON_RE.sub("", text)
     text = _convert_markdown_tables(text)
     text = _BR_TAG_RE.sub("\n", text)
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
@@ -197,6 +327,23 @@ def _citation_numbers_in(text: str) -> set[int]:
     return numbers
 
 
+_QUOTED_TEXT_RE = re.compile(r"[「『][^」』]*[」』]")
+
+
+def _citation_numbers_excluding_quoted(text: str) -> set[int]:
+    """跟 `_citation_numbers_in` 一樣，但會先把「...」/『...』引號
+    包起來的文字整段拿掉，才開始找引用編號，只給 `_split_by_vendor`
+    判斷段落歸屬用。
+
+    真實發生過的案例：回答結尾的通用建議句裡，模型舉了一個範例句
+    給使用者參考（例如「例如想看『卡司汽車 [6] 的現車』」），卻把
+    引用編號直接標在範例句裡——這個範例句本身不是在陳述卡司汽車的
+    資料，只是示範使用者可以怎麼問，適用於所有廠商，不該因為裡面
+    剛好舉了一個廠商當例子、又剛好帶了引用編號，就把整段結尾建議
+    誤判成只跟那家廠商有關，被拆成獨立一則、還貼上錯的標題。"""
+    return _citation_numbers_in(_QUOTED_TEXT_RE.sub("", text))
+
+
 def citation_numbers_in(text: str) -> set[int]:
     """回傳文字中出現過的所有引用編號（例如 "[1]"、"[1, 2]" 或
     "[1-3]" 裡的 1、2、3）。
@@ -219,6 +366,21 @@ def _strip_citations(text: str) -> str:
     # 引用編號被上面那行清掉之後會留下一個多餘的空格（變成
     # 「【標籤 】」）——這裡順手收掉，標籤本身不受影響。
     text = re.sub(r"[ \t]+】", "】", text)
+    # 保險措施：表格轉換時放入的列分隔線（`_ROW_SEPARATOR` /
+    # `_ENTITY_ROW_SEPARATOR`）理想上都該在
+    # `_promote_unambiguous_row_separators_to_paragraph_breaks` 被轉成真正的
+    # 段落空行或逐欄展開，但某些表格形狀兩種轉換條件都不成立——例如「單一
+    # 廠商、單一資料欄」（只有一台車符合條件、逐列列出它的各項屬性）：
+    # 每一列都能唯一歸屬到同一家廠商，但因為只有一家、不構成「橫跨多家
+    # 廠商」，不會被展開成段落；欄位名稱（屬性名稱）也各自只出現一次，
+    # 不構成「同一欄位重複出現在多列」，轉置也不會採用。兩邊都不處理的
+    # 結果，分隔線會原封不動留在文字裡，這裡是它在送到使用者手上之前
+    # 最後一個必經的清理點——如果真的還殘留到這裡，代表已知沒有跨廠商
+    # 拆散的風險（否則早就在前面被展開或轉置掉了），直接換成一般換行即可，
+    # 不該讓使用者看到內部使用的「－－－－－」原始占位字元（真實發生過的
+    # 案例：只有一家廠商符合條件時，回覆訊息裡出現一整排看不懂的
+    # 「－－－－－」）。
+    text = re.sub(rf"\n?(?:{re.escape(_ROW_SEPARATOR)}|{re.escape(_ENTITY_ROW_SEPARATOR)})\n?", "\n", text)
     return text.strip()
 
 
@@ -267,6 +429,70 @@ def _render_atoms(atoms: list[tuple[str, str, int]]) -> str:
     return "".join(parts)
 
 
+_REDUNDANT_VENDOR_PREFIX_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _redundant_vendor_prefix_re(vendor: str) -> re.Pattern:
+    """比對「這段內容開頭剛好就是這家廠商自己的『【廠商】』標籤」
+    的正規表示式，容許標籤後面還帶著尚未被 `_strip_citations` 清掉
+    的引用編號（例如「【中彰投汽車有限公司 [1]】」）。
+
+    比較表格轉成「一台車一個區塊」時，NotebookLM 有時會把廠商標籤
+    寫成帶全形括號的「【（廠商 [1]）】」（例如車型欄位標題底下的
+    「（卡司汽車 [1]）」），而不是單純的「【廠商】」——兩種寫法都要
+    認得，括號兩側也要容許空白（NotebookLM 有時會在括號內側多留
+    一個空格，例如「（中彰投汽車有限公司 ）」），不然這種帶括號的
+    版本就會漏網，跟外層【廠商】標題重複顯示。"""
+    pattern = _REDUNDANT_VENDOR_PREFIX_RE_CACHE.get(vendor)
+    if pattern is None:
+        escaped = re.escape(vendor)
+        citation = r"(?:\s*\[[\d,\s\-]+\])?"
+        pattern = re.compile(
+            rf"^【\s*[（(]?\s*{escaped}{citation}\s*[）)]?\s*{citation}】\n*"
+        )
+        _REDUNDANT_VENDOR_PREFIX_RE_CACHE[vendor] = pattern
+    return pattern
+
+
+_REDUNDANT_VENDOR_VALUE_LINE_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _redundant_vendor_value_line_re(vendor: str) -> re.Pattern:
+    """比對「欄位名稱：廠商名稱」這種整行的值剛好就是廠商名稱本身
+    的行（例如模型自己在比較表裡加了一列「車商名稱」／「提供廠商」，
+    轉置成一台車一個區塊之後，這一行的值會跟外層「【廠商】」標題
+    重複）。不特別比對欄位名稱本身寫的是什麼（「車商名稱」「提供
+    廠商」或其他說法），只要值剛好等於廠商名稱就視為重複，同樣
+    容許值後面帶著尚未清掉的引用編號。"""
+    pattern = _REDUNDANT_VENDOR_VALUE_LINE_RE_CACHE.get(vendor)
+    if pattern is None:
+        escaped = re.escape(vendor)
+        pattern = re.compile(
+            rf"^[^\n：]+：{escaped}(?:\s*\[[\d,\s\-]+\])?[ \t]*\n?", re.MULTILINE
+        )
+        _REDUNDANT_VENDOR_VALUE_LINE_RE_CACHE[vendor] = pattern
+    return pattern
+
+
+def _collapse_consecutive_row_separators(text: str) -> str:
+    """拿掉一整行剛好等於廠商名稱的欄位（見
+    `_redundant_vendor_value_line_re`）之後，那一行原本左右兩側的
+    分隔線就會直接相鄰、或是變成整段內容開頭／結尾——這裡把連續
+    出現的分隔線收合成一條，並且拿掉出現在開頭或結尾的分隔線
+    （沒有東西可以分隔了）。"""
+    lines = text.split("\n")
+    out: list[str] = []
+    for line in lines:
+        if line == _ROW_SEPARATOR and out and out[-1] == _ROW_SEPARATOR:
+            continue
+        out.append(line)
+    while out and out[0] == _ROW_SEPARATOR:
+        out.pop(0)
+    while out and out[-1] == _ROW_SEPARATOR:
+        out.pop()
+    return "\n".join(out)
+
+
 def _split_by_vendor(text: str, citation_vendor: dict[int, str]) -> list[str]:
     """依照每個原子引用的單一廠商，將回答內容分組——按廠商分桶，
     而不是只合併連續的片段——這樣即使一個項目符號清單中交錯著
@@ -307,12 +533,27 @@ def _split_by_vendor(text: str, citation_vendor: dict[int, str]) -> list[str]:
     for atom in atoms:
         _, content, para_idx = atom
         cited_vendors = {
-            citation_vendor[n] for n in _citation_numbers_in(content) if n in citation_vendor
+            citation_vendor[n]
+            for n in _citation_numbers_excluding_quoted(content)
+            if n in citation_vendor
         }
 
         if len(cited_vendors) == 1:
             vendor = next(iter(cited_vendors))
         elif len(cited_vendors) > 1 and last_vendor is not None:
+            # 這個原子本身確實無法單獨歸屬給某一家廠商，所以跟目前
+            # 分桶邏輯一致，直接接到「當前使用中」的廠商——但在接
+            # 它之前，要先把還在等待的 pending（例如一句還沒有引用、
+            # 正要鋪陳接下來這段比較內容的句子，像「這兩款車型的
+            # 核心差異如下：」）依原文順序先接進去，這個原子才接在
+            # 後面。少了這一步，pending 只會留到 for 迴圈結束後才
+            # 被整批接到分桶最後面（見下面「最後一個廠商之後的尾隨
+            # 內容」那段），鋪陳句就會被推到它原本要介紹的內容*之後*
+            # ——這是真實發生過的案例：使用者看到的訊息裡，「這兩款
+            # 車型的核心差異如下：」變成孤零零掛在整則訊息的最後一行，
+            # 後面卻沒接著任何比較內容。
+            buckets[last_vendor].extend(pending)
+            pending = []
             buckets[last_vendor].append(atom)
             continue
         else:
@@ -341,8 +582,40 @@ def _split_by_vendor(text: str, citation_vendor: dict[int, str]) -> list[str]:
     if pending:
         buckets[last_vendor].extend(pending)
 
+    def _build_vendor_message(vendor: str) -> str:
+        rendered = _render_atoms(buckets[vendor])
+        # 廠商總覽表那種「一列就是一家廠商」的表格，列本身的標籤
+        # 內容剛好就是廠商名稱（見 `_convert_markdown_tables`），
+        # 現在這種表格已經會拆成一家廠商一則訊息（見
+        # `_promote_unambiguous_row_separators_to_paragraph_breaks`）
+        # ——如果不處理，這裡再加一次「【廠商】」標題，廠商名稱就會
+        # 連續重複印兩次。只有在內容本身「剛好就是以同一個廠商名稱
+        # 開頭」時才去掉這個重複，其餘情況（例如列標籤是廠牌、車型
+        # 這種跟廠商名稱不同的內容）不受影響，維持原本的雙層資訊。
+        #
+        # 這裡還沒有經過 `_strip_citations`（那一步在這個函式的呼叫端
+        # 才會做），標籤後面可能還帶著引用編號（例如「【中彰投汽車
+        # 有限公司 [1]】」），比對時要把這個可能存在的引用編號也一併
+        # 算進去，不能只比對不含引用編號的字面全等。
+        redundant_prefix_re = _redundant_vendor_prefix_re(vendor)
+        rendered = redundant_prefix_re.sub("", rendered, count=1)
+
+        # 另一種真實發生過的重複：模型自己在比較表裡多加了一列
+        # 「車商名稱」／「提供廠商」來標示每台車屬於哪個廠商，轉置成
+        # 一台車一個區塊之後，每個區塊底下都會各自重複出現一行內容
+        # 剛好就是廠商名稱本身的欄位——這則訊息外層已經有「【廠商】」
+        # 標題了，逐項重複同一個廠商名稱只是雜訊。不特別認欄位名稱
+        # 寫的是什麼，只要某一行的值剛好等於廠商名稱就整行拿掉。
+        rendered = _redundant_vendor_value_line_re(vendor).sub("", rendered)
+        # 拿掉的那一行左右兩側可能各自留著一條分隔線——原本是用來隔開
+        # 「這一行」跟前後內容的，這一行整個被拿掉之後，兩條分隔線會
+        # 直接相鄰（或變成開頭／結尾），見該函式的說明。
+        rendered = _collapse_consecutive_row_separators(rendered)
+
+        return f"【{vendor}】\n\n{rendered}"
+
     messages = [_render_atoms(lead_atoms)] if lead_atoms else []
-    messages.extend(f"【{vendor}】\n\n{_render_atoms(buckets[vendor])}" for vendor in order)
+    messages.extend(_build_vendor_message(vendor) for vendor in order)
     return messages
 
 
@@ -412,6 +685,190 @@ def _correct_vendor_citation_mismatches(
     return pattern.sub(_replace, text)
 
 
+def _parse_row_major_table_block(rows: list[str]) -> list[tuple[str | None, list[tuple[str, str]]]]:
+    """把 `_convert_markdown_tables` 產生的、以列為單位的區塊文字
+    （已經用 `_ROW_SEPARATOR` 分開），逐列拆回 `(列標籤, [(欄位名稱, 內容), ...])`
+    的結構化資料，供 `_try_transpose_table_block_by_column` 使用。"""
+    parsed: list[tuple[str | None, list[tuple[str, str]]]] = []
+    for row_text in rows:
+        lines = [line for line in row_text.split("\n") if line.strip()]
+        row_label: str | None = None
+        pairs: list[tuple[str, str]] = []
+        for line in lines:
+            stripped = line.strip()
+            if (
+                not pairs
+                and row_label is None
+                and stripped.startswith("【")
+                and stripped.endswith("】")
+                and "：" not in stripped
+            ):
+                row_label = stripped[1:-1]
+                continue
+            if "：" in line:
+                col_name, _, cell = line.partition("：")
+                pairs.append((col_name.strip(), cell.strip()))
+        parsed.append((row_label, pairs))
+    return parsed
+
+
+def _try_transpose_table_block_by_column(
+    rows: list[str], citation_vendor: dict[int, str]
+) -> list[str] | None:
+    """`_promote_unambiguous_row_separators_to_paragraph_breaks` 的輔助
+    函式：當「每一列」都無法唯一歸屬到一個廠商時（真正的比較表，
+    不同廠商是分散在同一列裡的不同欄位，而不是逐列變化——例如同一
+    款車在不同廠商的規格比較，廠商剛好就是各個資料欄），改試著看
+    「每一欄」是否能唯一歸屬到一個廠商，如果可以，把資料從「以列
+    為單位」轉置成「以欄為單位」，讓每個廠商各自的完整規格集中在
+    同一個區塊裡，之後才能各自拆成獨立的訊息氣泡（真實發生過的
+    使用者需求：比較同一款車在不同廠商的規格時，希望同一家廠商的
+    資料出現在同一個氣泡裡，而不是逐項目交錯呈現）。
+
+    解析不出一致的欄位結構、或欄位一樣無法唯一歸屬時，回傳 None，
+    讓呼叫端維持原本以列為單位、合併成一則訊息的呈現方式——這是
+    安全的預設值，不會因為轉置失敗而弄壞內容。
+
+    只有一個資料欄的表格（`single_data_col`）轉換後，每一列本來就
+    只剩一組「屬性：值」，經過這個函式解析會變成「每一列各自貢獻
+    剛好一個獨有欄位名稱」——表面上符合「有多個欄位」的條件，但
+    這些欄位其實完全不重複出現在別的列裡，轉置沒有任何意義（只是
+    把同一批屬性重新包裝成一樣的樣子，還會讓每個屬性各自被拆成
+    獨立的段落，反而更零碎）。真正值得轉置的表格，同一個欄位名稱
+    必須在不只一列裡出現，所以額外要求至少有一個欄位名稱重複
+    出現在兩列以上，才視為真正一致的欄位結構。"""
+    parsed_rows = _parse_row_major_table_block(rows)
+
+    col_names: list[str] = []
+    col_occurrence_counts: dict[str, int] = {}
+    for _, pairs in parsed_rows:
+        for col_name, _ in pairs:
+            if col_name not in col_names:
+                col_names.append(col_name)
+            col_occurrence_counts[col_name] = col_occurrence_counts.get(col_name, 0) + 1
+
+    if len(col_names) < 2:
+        return None
+    if max(col_occurrence_counts.values(), default=0) < 2:
+        return None
+
+    col_vendor_sets = []
+    for col_name in col_names:
+        cells = [col_name] + [
+            cell for _, pairs in parsed_rows for (cn, cell) in pairs if cn == col_name
+        ]
+        combined = " ".join(cells)
+        vendors = {
+            citation_vendor[n]
+            for n in _citation_numbers_excluding_quoted(combined)
+            if n in citation_vendor
+        }
+        col_vendor_sets.append(vendors)
+
+    if not all(len(vendors) == 1 for vendors in col_vendor_sets):
+        return None
+
+    blocks = []
+    for col_name in col_names:
+        lines = [f"【{col_name}】"]
+        for row_label, pairs in parsed_rows:
+            cell = next((c for cn, c in pairs if cn == col_name), None)
+            if not cell:
+                continue
+            lines.append(f"{row_label}：{cell}" if row_label else cell)
+        blocks.append("\n".join(lines))
+    return blocks
+
+
+def _promote_unambiguous_row_separators_to_paragraph_breaks(
+    text: str, citation_vendor: dict[int, str]
+) -> str:
+    """把「每一列都能唯一歸屬到剛好一個廠商」的表格區塊，從「分隔線
+    分隔、維持同一個原子」升級成「空行分隔、各自獨立的段落」，讓
+    `_split_by_vendor` 把它們拆成各自獨立的訊息——用來讓「廠商總覽表」
+    這種一列就是一家廠商的表格，回到每家廠商各自一則訊息氣泡的呈現
+    方式（`_convert_markdown_tables` 沒辦法在轉換當下就做這個判斷，
+    因為那時候還不知道每個引用編號對應到哪個廠商，只能先用分隔線
+    頂著，見該函式的說明）。
+
+    兩種分隔字串分開處理（見 `_ENTITY_ROW_SEPARATOR` 的說明）：
+
+    - `_ENTITY_ROW_SEPARATOR`：轉換當下就已經確定每一列的標籤是
+      逐列變化的真實實體（例如廠牌／車型），只要每一列都能唯一
+      歸屬到一個廠商就直接逐列展開，不會再嘗試逐欄分組——這種表格
+      本來就已經是正確的方向，不該被誤判成「其實該逐欄分組」。
+
+    - `_ROW_SEPARATOR`：如果「每一列」都能唯一歸屬、而且真的橫跨
+      不只一家廠商（典型的廠商總覽表，一列就是一家廠商），逐列展開
+      最有意義，直接採用。否則會改試著看「每一欄」是否能唯一歸屬到
+      一個廠商（見 `_try_transpose_table_block_by_column`）——這裡
+      刻意優先試欄，而不是只要逐列能唯一歸屬就直接採用：真實發生過
+      的案例是模型自己先依廠商分好幾個小節、每個小節底下比較「同一
+      家廠商的好幾台車」，這種表格逐列展開時，每一列（例如「年份」）
+      雖然也都唯一歸屬到同一家廠商（因為整段本來就只有這一家），
+      但這樣做完全沒有分開任何東西，呈現出來會變成「依規格項目
+      分組」而不是使用者要的「依車輛分組、同一台車的完整資料集中
+      在同一個區塊」。只有在「逐列能唯一歸屬、且真的橫跨多家廠商」
+      時，逐列展開才是唯一有意義的選擇，這時才會直接採用，不繞去
+      試逐欄。
+
+    兩種方向都試過還是不行，分隔線才會原封不動保留，繼續合併成
+    一則訊息，避免比較表的標題和內容被拆散到不同廠商的訊息氣泡裡。
+    """
+    if _ROW_SEPARATOR not in text and _ENTITY_ROW_SEPARATOR not in text:
+        return text
+
+    paragraphs = _PARAGRAPH_SPLIT_RE.split(text)
+    out_paragraphs = []
+    for para in paragraphs:
+        if _ENTITY_ROW_SEPARATOR in para:
+            rows = [row.strip("\n") for row in para.split(_ENTITY_ROW_SEPARATOR)]
+            vendor_sets = [
+                {
+                    citation_vendor[n]
+                    for n in _citation_numbers_excluding_quoted(row)
+                    if n in citation_vendor
+                }
+                for row in rows
+            ]
+            if all(len(vendors) == 1 for vendors in vendor_sets):
+                out_paragraphs.extend(rows)
+            else:
+                out_paragraphs.append(para)
+            continue
+
+        if _ROW_SEPARATOR not in para:
+            out_paragraphs.append(para)
+            continue
+
+        rows = [row.strip("\n") for row in para.split(_ROW_SEPARATOR)]
+        vendor_sets = [
+            {
+                citation_vendor[n]
+                for n in _citation_numbers_excluding_quoted(row)
+                if n in citation_vendor
+            }
+            for row in rows
+        ]
+        row_homogeneous = all(len(vendors) == 1 for vendors in vendor_sets)
+        distinct_row_vendors = {v for vendors in vendor_sets for v in vendors}
+
+        if row_homogeneous and len(distinct_row_vendors) > 1:
+            out_paragraphs.extend(rows)
+            continue
+
+        transposed = _try_transpose_table_block_by_column(rows, citation_vendor)
+        if transposed is not None:
+            out_paragraphs.extend(transposed)
+        else:
+            # 逐列展開沒有意義（要嘛整段本來就只有一家廠商、逐列展開
+            # 沒有分開任何東西，要嘛某一列橫跨多個廠商），逐欄轉置也
+            # 失敗——兩種方向都試過還是不行，維持原本合併成一則、
+            # 分隔線原封不動保留的呈現方式，不強行拆開。
+            out_paragraphs.append(para)
+    return "\n\n".join(out_paragraphs)
+
+
 _UNCLASSIFIED_HEADER = "【未分類】"
 _NO_VENDOR_MATCH_REPLY = "很抱歉，目前的資料無法明確對應到特定廠商，請提供更明確的條件（如廠牌、車型）以便查詢。"
 
@@ -428,6 +885,8 @@ def _split_and_classify(
 
     cited_numbers = _citation_numbers_in(text) & source_map.keys()
     citation_vendor = {n: vendor_from_title(source_map[n]) for n in cited_numbers}
+
+    text = _promote_unambiguous_row_separators_to_paragraph_breaks(text, citation_vendor)
 
     parts = [_strip_citations(part) for part in _split_by_vendor(text, citation_vendor)]
     dropped = [part for part in parts if part.startswith(_UNCLASSIFIED_HEADER)]

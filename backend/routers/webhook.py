@@ -122,8 +122,16 @@ def _is_car_related_question(text: str) -> bool:
     包含字面上的汽車名詞，但在這個機器人的經銷商諮詢情境中，
     這些本質上就是與車相關的——因此這些類別也一併納入判斷，
     而不只是單純的關鍵字清單。
+
+    關鍵字比對刻意不分大小寫（真實發生過的案例：清單裡放的是
+    「Nissan」「Kicks」，使用者輸入全小寫的「nissan kicks」對不上，
+    被誤判成非車輛問題）——但 `_MODEL_CODE_RE`（判斷裸的全大寫代號，
+    例如「CRV」）刻意維持只認全大寫，這是它用來跟一般小寫英文單字
+    做區分的訊號，不能一起變成不分大小寫，否則任何兩個字母的小寫
+    單字都會被誤判成車型代號。
     """
-    if any(keyword in text for keyword in _CAR_RELATED_KEYWORDS):
+    text_lower = text.lower()
+    if any(keyword.lower() in text_lower for keyword in _CAR_RELATED_KEYWORDS):
         return True
     if _MODEL_CODE_RE.search(text):
         return True
@@ -156,6 +164,10 @@ _AUTHORIZATION_PROMISE_KEYWORDS = (
 _RESTRICTED_TOPIC_REPLY = (
     "不好意思，像是授權、承諾或保證等問題，這邊沒辦法直接答覆您，"
     "還是要麻煩您與業務人員確認，才能給您最準確的說明 🙏"
+)
+_OFF_TOPIC_REPLY = (
+    "不好意思，我只能協助車輛規格、配備、現有庫存等相關問題喔，"
+    "有什麼想了解的車款嗎？"
 )
 _PURCHASE_INTENT_PREFIX = (
     "不好意思，購車、報價這類交易細節得由業務人員親自為您服務，"
@@ -417,6 +429,22 @@ async def webhook(channel_id: str, request: Request):
                 )
                 continue
 
+            # 群組/聊天室在更早（第 341 行附近）就已經先做過車輛相關性
+            # 判斷，沒過關的訊息根本不會執行到這裡；但 1:1 聊天完全
+            # 沒有經過那一關（見上面的說明：1:1 不需要 @mention 也不
+            # 需要車輛相關性判斷就會被處理），導致跟車輛完全無關的
+            # 問題（例如問颱風動態）會被直接轉給 NotebookLM——NotebookLM
+            # 有時候會為了「幫忙」而觸發它自己的網路搜尋功能，回答裡
+            # 夾帶只有網頁版看得懂的 UI 元件描述，在 LINE 上會變成一
+            # 大坨亂碼。1:1 這裡也要做同樣的把關，跟知識庫無關的問題
+            # 一律當閒聊回絕，不要送進 NotebookLM。
+            if source_type == "user" and not _is_car_related_question(question):
+                await reply_text(
+                    reply_token, access_token, _OFF_TOPIC_REPLY,
+                    mention_user_id, mention_display_name,
+                )
+                continue
+
             await _show_working_indicator(source_type, target_id, access_token, "⏳正在查詢中，請稍後")
 
             await _ask_and_reply(
@@ -444,13 +472,21 @@ async def _ask_and_reply(
     reply 訊息不像 push 訊息那樣會被計入帳號每月的 LINE 訊息額度。
     這會讓 webhook handler 阻塞至 NotebookLM 查詢完成為止，
     所以非常慢的查詢有 reply token 過期的風險；這是為了不依賴
-    push 而接受的取捨。"""
+    push 而接受的取捨。
+
+    當答案依廠商分則後超過 5 則（LINE 一次 reply 呼叫的訊息數上限）
+    時，前 5 則仍用免額度的 reply 送出，其餘的才改用 push——寧可
+    多花一點額度，也不要讓超過第 5 家的廠商資訊直接消失、使用者
+    完全看不到（這是真實發生過的情況：8 家廠商的總覽拆成一家一則
+    之後，只用 reply 的話後面 3 家會被悄悄截掉）。"""
+    target_id = group_id or room_id or sender_user_id
+
     try:
         messages = await ask_question(channel_id, question, sender_user_id)
-        if not messages:
-            messages = ["⚠️ 沒有取得回覆內容，請稍後再試。"]
-        await reply_text(reply_token, access_token, messages, mention_user_id, mention_display_name)
     except Exception as e:
+        # ask_question 本身就失敗了——這通常很快就會發生（例如筆記本未
+        # 綁定、API 直接回錯），reply_token 這時候幾乎一定還沒過期，
+        # 用它回覆錯誤訊息是安全的。
         logger.error(f"[{channel_id}] Error: {e}")
         try:
             await reply_text(
@@ -463,6 +499,65 @@ async def _ask_and_reply(
                 f"silent:{channel_id}",
                 f"⚠️ 頻道 {channel_id} 的使用者完全沒收到任何回覆"
                 f"（原始錯誤：{e}；fallback 回覆也失敗：{reply_error}）",
+            )
+        return
+
+    if not messages:
+        messages = ["⚠️ 沒有取得回覆內容，請稍後再試。"]
+    reply_messages, overflow_messages = messages[:5], messages[5:]
+
+    try:
+        await reply_text(reply_token, access_token, reply_messages, mention_user_id, mention_display_name)
+    except Exception as reply_error:
+        # ask_question 已經成功拿到答案了——這裡失敗幾乎都是因為查詢本身
+        # 耗時太久（NotebookLM 對跨多家廠商的問題常需要 3-5 分鐘），
+        # reply_token 早就過期。用同一個 token 再重試一次 reply 沒有意義
+        # （token 本來就是一次性、而且已經失效），過去這樣做的結果就是
+        # 使用者完全收不到任何東西、連錯誤訊息都沒有（真實發生過的
+        # 案例）。改用 push 才有機會把答案送到使用者手上——這則答案
+        # 已經生成好了，不該平白浪費掉。
+        logger.error(
+            f"[{channel_id}] reply_text failed (likely an expired reply_token after "
+            f"a slow query): {reply_error}"
+        )
+        if not target_id:
+            logger.warning(f"[{channel_id}] No usable target id for push fallback after reply failure")
+            await notify_admin(
+                f"silent:{channel_id}",
+                f"⚠️ 頻道 {channel_id} 的使用者完全沒收到任何回覆"
+                f"（reply 失敗：{reply_error}；且沒有可用的 target id 可以 push）",
+            )
+            return
+        try:
+            for msg in reply_messages:
+                await push_text(target_id, access_token, msg)
+        except Exception as push_error:
+            logger.error(f"[{channel_id}] Push fallback also failed: {push_error}")
+            await notify_admin(
+                f"silent:{channel_id}",
+                f"⚠️ 頻道 {channel_id} 的使用者完全沒收到任何回覆"
+                f"（reply 失敗：{reply_error}；push fallback 也失敗：{push_error}）",
+            )
+            return
+
+    if overflow_messages:
+        if target_id:
+            for extra in overflow_messages:
+                try:
+                    await push_text(target_id, access_token, extra)
+                except Exception as push_error:
+                    # 主要的回答（前 5 則）已經送出去了——這裡失敗
+                    # 只代表超過 5 則之後的部分沒送到，不該讓使用者
+                    # 看到「系統發生錯誤」這種好像整個查詢都失敗的
+                    # 訊息，記錄下來讓管理員知道即可。
+                    logger.error(
+                        f"[{channel_id}] Failed to push overflow message "
+                        f"(beyond LINE's 5-message reply limit): {push_error}"
+                    )
+        else:
+            logger.warning(
+                f"[{channel_id}] {len(overflow_messages)} overflow message(s) "
+                "dropped: no usable target id for push fallback"
             )
 
 
