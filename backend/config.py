@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     dealer_contact_info: str = "不過我可以幫您查詢車輛的規格、配備、現有庫存、年份與顏色等資訊，歡迎直接告訴我您想了解的車款！"
     admin_line_user_id: str = ""
     admin_alert_access_token: str = ""
+    nlm_health_scheduler_enabled: bool = True
 
     class Config:
         env_file = ".env"

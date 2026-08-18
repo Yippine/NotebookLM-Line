@@ -434,6 +434,12 @@ async def check_all_channels_health() -> None:
     那一刻發送一次——同一個 channel 持續壞著的話，接下來每半小時
     再檢查到同樣的失敗，不會重複告警，直到它恢復正常、之後又再次
     壞掉為止，才會發出下一次通知。
+
+    這支排程只是保底：真正有學生在問問題的 channel，ask_question()
+    一撞到認證失敗就會立刻把狀態標成 expired（見該函式），不需要
+    等這裡的排程輪到它——這裡存在的意義是涵蓋「暫時沒人問問題」
+    的 channel，讓它的失效不會一直沒被發現，直到半小時後才被這裡
+    抓到為止。
     """
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
@@ -525,7 +531,8 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
     async with aiosqlite.connect(DB) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT nlm_auth_json_encrypted, notebook_id FROM channels WHERE channel_id=?",
+            "SELECT nlm_auth_json_encrypted, notebook_id, nlm_health_status "
+            "FROM channels WHERE channel_id=?",
             (channel_id,),
         )
         row = await cur.fetchone()
@@ -535,6 +542,7 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
 
     storage_state = decrypt(row["nlm_auth_json_encrypted"])
     notebook_id = row["notebook_id"]
+    was_expired = row["nlm_health_status"] == "expired"
 
     conversation_id = (
         await _get_conversation_id(channel_id, line_user_id) if line_user_id else None
@@ -628,6 +636,12 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
         messages = build_answer_messages(formatted, source_map, known_vendors)
         if conversation_id is None:
             _save_cached_answer(channel_id, question, messages)
+        if was_expired:
+            # 這次提問成功了，代表 cookie 其實已經活過來了（可能是
+            # 套件自動換發、也可能是有人剛好在別處重新登入）——立刻
+            # 把狀態改回 healthy，不要留著 expired 讓 nlm_cookie_refresh.py
+            # 的偵測閘門誤以為還在壞、白白再刷新一次。
+            await _set_health_status(channel_id, "healthy")
         return messages
     except Exception as e:
         await notify_admin(
@@ -636,6 +650,12 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
             "常見原因是登入 cookie 失效，請確認是否需要重新 notebooklm login。",
         )
         if _AUTH_FAILURE_SIGNATURE in str(e):
+            # 立刻把這個 channel 標成 expired，不必等 check_all_channels_health()
+            # 下一次排程（最多半小時後）才發現——這是使用者真的問問題時
+            # 當場撞到的失敗，是最即時的偵測時機。scripts/nlm_cookie_refresh.py
+            # 會頻繁檢查這個欄位，一旦看到 expired 就會立刻嘗試刷新，
+            # 不用再等它自己那個排程週期。
+            await _set_health_status(channel_id, "expired")
             # cookie 失效目前還會不定期發生（管理員通常幾分鐘內就會手動
             # 重新登入修復），但在修好之前，使用者不該看到
             # 「Authentication expired or invalid...Run 'notebooklm login'」

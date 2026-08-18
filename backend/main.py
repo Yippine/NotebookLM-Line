@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from database import init_db, DB
+from config import settings
 import aiosqlite
 import os
 
@@ -85,10 +86,15 @@ async def nlm_health_scheduler():
 async def lifespan(app: FastAPI):
     await init_db()
     expiry_task = asyncio.create_task(expiry_scheduler())
-    nlm_health_task = asyncio.create_task(nlm_health_scheduler())
+    if settings.nlm_health_scheduler_enabled:
+        nlm_health_task = asyncio.create_task(nlm_health_scheduler())
+    else:
+        nlm_health_task = None
+        logger.warning("NLM health scheduler is disabled via NLM_HEALTH_SCHEDULER_ENABLED=false")
     yield
     expiry_task.cancel()
-    nlm_health_task.cancel()
+    if nlm_health_task is not None:
+        nlm_health_task.cancel()
     from services.line_service import aclose_client
     from services.nlm_service import aclose_all_clients
     await aclose_client()

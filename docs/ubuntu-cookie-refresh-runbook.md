@@ -71,7 +71,7 @@ cd /path/to/repo
 python3 scripts/nlm_cookie_refresh.py
 ```
 
-看到每個 channel 印出 `rebind ok` 才算過。如果印出「找不到 storage_state.json」，先確認 Firefox 那個 profile 底下真的有登入過。
+看到每個 channel 印出 `rebind ok` 才算過（這次手動測試會真的跑完整套流程，因為此時 DB 裡通常還沒有任何 channel 被標成 `expired`——如果閘門擋下來什麼都沒發生，先手動把某個 channel 的 `nlm_health_status` 改成 `expired` 再重跑一次）。如果印出「找不到 storage_state.json」，先確認 Firefox 那個 profile 底下真的有登入過。
 
 ### 7. 排 cron
 
@@ -82,12 +82,14 @@ sudo -u nlm-bot crontab -e
 加入：
 
 ```
-*/30 * * * * cd /path/to/repo && python3 scripts/nlm_cookie_refresh.py >> /var/log/nlm_cookie_refresh.log 2>&1
+* * * * * cd /path/to/repo && python3 scripts/nlm_cookie_refresh.py >> /var/log/nlm_cookie_refresh.log 2>&1
 ```
+
+每分鐘跑一次，不是每半小時——這支腳本現在是「偵測到後端把某個 channel 標成 `expired` 才真的刷新」（見腳本 docstring 裡的 `any_channel_expired()`），沒有 channel 掛掉的那幾輪只是讀一次本機 SQLite 就結束，成本低到可以忽略。排密一點的意義純粹是縮短「後端偵測到掛了」到「這支腳本真的去刷新」之間的延遲，不會因此變得比較吵。
 
 ### 8. 確認告警有接上
 
-`nlm_cookie_refresh.py` 失敗時會讀 `backend/.env` 裡的 `ADMIN_LINE_USER_ID`/`ADMIN_ALERT_ACCESS_TOKEN` 發 LINE 通知——確認這台 Ubuntu 上的 `backend/.env` 也填了這兩個值（跟 Windows 主機上的一樣）。這是最後一道防線：就算前面的隔離措施還是被誰不小心弄壞，下一次 cron 執行失敗時你會馬上收到通知，而不是等學員反映才發現。正常運作時完全靜默，不會每半小時發一則「一切正常」的訊息。
+`nlm_cookie_refresh.py` 失敗時會讀 `backend/.env` 裡的 `ADMIN_LINE_USER_ID`/`ADMIN_ALERT_ACCESS_TOKEN` 發 LINE 通知——確認這台 Ubuntu 上的 `backend/.env` 也填了這兩個值（跟 Windows 主機上的一樣）。這是最後一道防線：就算前面的隔離措施還是被誰不小心弄壞，下一次真的偵測到失效時你會馬上收到通知，而不是等學員反映才發現。正常運作時完全靜默；同一個尚未解決的失敗原因也有 30 分鐘告警冷卻（見腳本 `_ALERT_COOLDOWN_SECONDS`），不會因為排程改密就被同一個問題洗版。
 
 ## 之後如果要更進一步隔離
 
