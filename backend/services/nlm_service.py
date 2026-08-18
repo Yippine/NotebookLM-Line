@@ -3,6 +3,7 @@ import logging
 import os
 import asyncio
 import mimetypes
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -94,21 +95,53 @@ def _invalidate_sources_cache(notebook_id: str) -> None:
     _sources_cache.pop(notebook_id, None)
 
 
-# 針對「完全相同問題文字」的短時間答案快取，以 (channel_id, 問題文字)
+# 針對「完全相同問題文字」的答案快取，以 (channel_id, 問題文字)
 # 為 key。同一個問題重問 NotebookLM，生成時間本身就有很大的變異
 # （實測同一句話問兩次，一次 191 秒、一次 48 秒），群組裡又常常有
 # 好幾個人各自問到類似或完全相同的問題（例如「你們家有現車嗎」）
-# ——與其每次都重新付出這個生成成本，短時間內完全相同的問題直接
+# ——與其每次都重新付出這個生成成本，一段時間內完全相同的問題直接
 # 回傳上一次的答案。只在「這次提問沒有延續任何既有對話」時才使用
 # 快取（見 ask_question 裡 conversation_id is None 的判斷）：一旦是
 # 延續某個使用者自己對話串的追問，答案就跟那個人前面問過什麼有關，
 # 不能被別人的、或這個人自己更早、不相干的快取答案取代。
-_ANSWER_CACHE_TTL_SECONDS = 300
+#
+# TTL 拉到 30 分鐘（原本 5 分鐘）：知識庫內容不會在這個時間尺度內
+# 變動（更新知識庫是明確的上傳動作，不是背景自動變化），拉長快取
+# 命中窗口純粹是換取更多次重複問題不必再等一次生成，沒有額外的
+# 資料新鮮度代價。
+_ANSWER_CACHE_TTL_SECONDS = 1800
 _answer_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+
+# 快取 key 只比對「拿掉標點符號、空白，以及句尾語氣助詞之後」的問題
+# 文字，而不是逐字比對——群組裡常有好幾個人問法幾乎一樣、只差在
+# 標點或語氣（「你們家有現車嗎」「你們家有現車嗎？」「你們家有 現車
+# 嗎」），逐字比對會讓這些其實同一個問題的變體，各自重新付出一次
+# 生成成本。
+#
+# 刻意不處理會改變句型結構的差異（例如「有沒有」vs「有」、「可以」
+# vs「能不能」）——這裡的目標只是消掉純粹的標點/語氣雜訊，不是做
+# 語意層級的問題等價判斷；貿然合併句型不同的問法，一旦誤判就會讓
+# 使用者收到答非所問的快取答案，比多等一次生成更糟。
+_CACHE_KEY_PUNCTUATION_RE = re.compile(
+    r"[，。！？、；：「」『』（）()\[\]【】～~,.;:!?\"'`\-_\s]+"
+)
+_CACHE_KEY_TRAILING_PARTICLES = ("嗎", "呢", "啊", "呀", "喔", "唄", "吧", "囉", "嘛", "耶", "捏")
+
+
+def _normalize_question_for_cache_key(question: str) -> str:
+    normalized = _CACHE_KEY_PUNCTUATION_RE.sub("", question)
+    trimmed = True
+    while trimmed:
+        trimmed = False
+        for particle in _CACHE_KEY_TRAILING_PARTICLES:
+            if normalized.endswith(particle):
+                normalized = normalized[: -len(particle)]
+                trimmed = True
+    return normalized
 
 
 def _get_cached_answer(channel_id: str, question: str) -> list[str] | None:
-    key = (channel_id, question.strip())
+    key = (channel_id, _normalize_question_for_cache_key(question))
     cached = _answer_cache.get(key)
     if cached is None:
         return None
@@ -120,7 +153,7 @@ def _get_cached_answer(channel_id: str, question: str) -> list[str] | None:
 
 
 def _save_cached_answer(channel_id: str, question: str, messages: list[str]) -> None:
-    key = (channel_id, question.strip())
+    key = (channel_id, _normalize_question_for_cache_key(question))
     _answer_cache[key] = (time.time() + _ANSWER_CACHE_TTL_SECONDS, messages)
 
 

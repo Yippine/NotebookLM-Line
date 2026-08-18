@@ -97,6 +97,37 @@ def test_different_question_text_is_not_served_from_cache(tmp_path, monkeypatch)
     assert len(client.chat.calls) == 2
 
 
+def test_same_question_differing_only_in_punctuation_or_spacing_hits_cache(tmp_path, monkeypatch):
+    channel_id, client = _setup(tmp_path, monkeypatch)
+
+    asyncio.run(nlm_service.ask_question(channel_id, "你們家有現車嗎", line_user_id=None))
+    asyncio.run(nlm_service.ask_question(channel_id, "你們家有 現車嗎？", line_user_id=None))
+    asyncio.run(nlm_service.ask_question(channel_id, "你們家有現車嗎!", line_user_id=None))
+
+    assert len(client.chat.calls) == 1
+
+
+def test_same_question_differing_only_in_trailing_particle_hits_cache(tmp_path, monkeypatch):
+    channel_id, client = _setup(tmp_path, monkeypatch)
+
+    asyncio.run(nlm_service.ask_question(channel_id, "你們家有現車嗎", line_user_id=None))
+    asyncio.run(nlm_service.ask_question(channel_id, "你們家有現車", line_user_id=None))
+
+    assert len(client.chat.calls) == 1
+
+
+def test_question_with_different_sentence_structure_is_not_merged_by_normalization(tmp_path, monkeypatch):
+    # 「有沒有」跟「有」句型不同，即使去掉標點/語氣助詞後看起來相近，
+    # 也不該被合併成同一個快取 key——避免把語意不同的問法誤判成
+    # 同一句而快取命中錯誤答案。
+    channel_id, client = _setup(tmp_path, monkeypatch)
+
+    asyncio.run(nlm_service.ask_question(channel_id, "你們家有沒有現車", line_user_id=None))
+    asyncio.run(nlm_service.ask_question(channel_id, "你們家有現車嗎", line_user_id=None))
+
+    assert len(client.chat.calls) == 2
+
+
 def test_same_question_in_a_different_channel_is_not_shared(tmp_path, monkeypatch):
     channel_id, client = _setup(tmp_path, monkeypatch)
 
