@@ -11,6 +11,7 @@ from markitdown import MarkItDownException
 from services.alert_service import notify_admin
 from services.crypto_service import encrypt, decrypt
 from services.doc_converter import convert_to_markdown
+from services.text_formatter import vendor_from_title
 from database import DB
 import aiosqlite
 
@@ -299,20 +300,31 @@ async def replace_sources_for_notebook(
 ) -> str:
     """將檔案上傳到筆記本。
 
-    若已存在同名（title）的來源，會先刪除它，再以新上傳的檔案
-    取代。不同名稱的來源則不受影響，讓知識庫能持續累積檔案，
-    而不是每次上傳都被清空重來。
+    若已存在同一家廠商（用檔名判斷）的來源，會先刪除它，再以新
+    上傳的檔案取代。不同廠商的來源則不受影響，讓知識庫能持續累積
+    檔案，而不是每次上傳都被清空重來。
     """
 
     async def _replace(client):
         existing_sources = await client.sources.list(notebook_id)
         uploaded_title = title or Path(file_name).name
+        uploaded_vendor = vendor_from_title(uploaded_title)
 
-        # 只有標題與新檔案名稱完全相符的來源，才會被視為「同一份
-        # 檔案」而遭到覆蓋。
-        duplicate_sources = [
-            s for s in existing_sources if s.title == uploaded_title
-        ]
+        # 檔名慣例是 `{廠商}{日期}`，同一家廠商每天上傳的檔名都不
+        # 一樣，不能用完整檔名逐字比對（那樣永遠對不上，舊檔案就
+        # 會一直堆積、覆蓋機制形同虛設）。改用廠商名稱比對，忽略
+        # 日期差異。檔名不符合「廠商+日期」慣例、抓不出廠商
+        # （歸類為「未分類」）的來源，才退回用完整檔名逐字比對，
+        # 避免彼此誤判成同一家廠商而被錯誤覆蓋。
+        if uploaded_vendor != "未分類":
+            duplicate_sources = [
+                s for s in existing_sources
+                if vendor_from_title(s.title) == uploaded_vendor
+            ]
+        else:
+            duplicate_sources = [
+                s for s in existing_sources if s.title == uploaded_title
+            ]
 
         with tempfile.NamedTemporaryFile(
             suffix=Path(file_name).suffix or ".txt",
