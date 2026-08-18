@@ -311,6 +311,21 @@ def vendor_from_title(title: str) -> str:
     return "未分類"
 
 
+def _date_from_title(title: str) -> str | None:
+    """從來源檔名中擷取結尾的 8 位數西元年月日字串（見 `vendor_from_title`
+    的檔名慣例說明），代表這份來源最後一次上傳／覆蓋的日期。
+
+    因為同一家廠商的舊來源會在重新上傳時被整份取代（見
+    `nlm_service.upload_file` 的覆蓋邏輯），檔名裡的日期等同於這家
+    廠商資料的「更新日期」，供 `_split_by_vendor` 用來把最近更新的
+    廠商排在回答訊息的最前面。不符合「結尾 8 位數字」慣例的檔名
+    （例如舊式的 "McLaren_型錄.md"）回傳 None，代表無從得知更新
+    日期，排序時會被視為最舊、排在有日期的廠商之後。"""
+    stem = Path(title).stem
+    match = _TRAILING_DATE_RE.search(stem)
+    return match.group(0) if match else None
+
+
 def _citation_numbers_in(text: str) -> set[int]:
     numbers = set()
     for match in _CITATION_GROUP_RE.finditer(text):
@@ -493,10 +508,20 @@ def _collapse_consecutive_row_separators(text: str) -> str:
     return "\n".join(out)
 
 
-def _split_by_vendor(text: str, citation_vendor: dict[int, str]) -> list[str]:
+def _split_by_vendor(
+    text: str,
+    citation_vendor: dict[int, str],
+    citation_date: dict[int, str | None] | None = None,
+) -> list[str]:
     """依照每個原子引用的單一廠商，將回答內容分組——按廠商分桶，
     而不是只合併連續的片段——這樣即使一個項目符號清單中交錯著
     多個廠商的項目，最終每個廠商仍會整理成一則乾淨的訊息。
+
+    各廠商的訊息氣泡最終會依 ``citation_date``（見 `_date_from_title`）
+    重新排序，最近更新的廠商排最前面；沒有日期資訊的廠商視為最舊，
+    排在所有有日期的廠商之後，彼此之間則維持原本依文字中出現順序
+    排列（Python 的 `sorted` 是穩定排序）。不影響開頭那則不帶廠商
+    標籤的開場白訊息——它一律留在最前面。
 
     有兩種原子無法單靠自身歸屬到某一個廠商，會分別處理：
 
@@ -581,6 +606,19 @@ def _split_by_vendor(text: str, citation_vendor: dict[int, str]) -> list[str]:
     # 會保留附加在最後一個廠商上，而不是被丟棄。
     if pending:
         buckets[last_vendor].extend(pending)
+
+    # 依廠商上次更新日期，把最近更新的廠商排到最前面。一家廠商可能
+    # 被好幾個引用編號引用到（例如同一份來源被引用兩次），取其中
+    # 最新的日期代表這家廠商；完全沒有日期資訊（`_date_from_title`
+    # 回傳 None，例如舊式檔名）的廠商，key 用空字串墊底，會被排到
+    # 所有有日期的廠商之後——彼此之間則因為 `sorted` 是穩定排序，
+    # 維持原本依文字出現順序排列的相對順序，行為跟排序前一致。
+    vendor_dates: dict[str, str] = {}
+    for citation_number, vendor in citation_vendor.items():
+        date = (citation_date or {}).get(citation_number)
+        if date and date > vendor_dates.get(vendor, ""):
+            vendor_dates[vendor] = date
+    order = sorted(order, key=lambda v: vendor_dates.get(v, ""), reverse=True)
 
     def _build_vendor_message(vendor: str) -> str:
         rendered = _render_atoms(buckets[vendor])
@@ -885,10 +923,14 @@ def _split_and_classify(
 
     cited_numbers = _citation_numbers_in(text) & source_map.keys()
     citation_vendor = {n: vendor_from_title(source_map[n]) for n in cited_numbers}
+    citation_date = {n: _date_from_title(source_map[n]) for n in cited_numbers}
 
     text = _promote_unambiguous_row_separators_to_paragraph_breaks(text, citation_vendor)
 
-    parts = [_strip_citations(part) for part in _split_by_vendor(text, citation_vendor)]
+    parts = [
+        _strip_citations(part)
+        for part in _split_by_vendor(text, citation_vendor, citation_date)
+    ]
     dropped = [part for part in parts if part.startswith(_UNCLASSIFIED_HEADER)]
     messages = [part for part in parts if not part.startswith(_UNCLASSIFIED_HEADER)]
 

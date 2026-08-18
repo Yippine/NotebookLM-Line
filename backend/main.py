@@ -95,9 +95,11 @@ async def lifespan(app: FastAPI):
     expiry_task.cancel()
     if nlm_health_task is not None:
         nlm_health_task.cancel()
+    from services.google_chat_service import aclose_client as aclose_google_chat_client
     from services.line_service import aclose_client
     from services.nlm_service import aclose_all_clients
     await aclose_client()
+    await aclose_google_chat_client()
     await aclose_all_clients()
 
 

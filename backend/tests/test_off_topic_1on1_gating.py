@@ -145,3 +145,77 @@ def test_off_topic_question_mentioned_in_group_chat_is_not_affected_by_this_chan
     _run_webhook(channel_id, secret, f"@{webhook.BOT_NAME} 颱風會不會襲台", source_type="group")
 
     assert asked == ["颱風會不會襲台"]
+
+
+def _insert_conversation(db_path: str, channel_id: str, line_user_id: str, minutes_ago: float) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO user_conversations (channel_id, line_user_id, conversation_id, updated_at) "
+        "VALUES (?, ?, 'conv-1', datetime('now', ?))",
+        (channel_id, line_user_id, f"-{minutes_ago} minutes"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_follow_up_without_car_keywords_still_reaches_notebooklm_during_active_conversation(tmp_path, monkeypatch):
+    """重現實際發生過的真實案例：機器人一次回覆了跨多家廠商的比較
+    表，使用者馬上追問「其他5家呢？」——這句話完全沒有任何車輛
+    關鍵字，卻被當成閒聊直接打槍。使用者剛剛才跟機器人聊過車
+    （2 分鐘前才有一則對話紀錄），這時候不該重新套用嚴格的關鍵字
+    判斷，應該讓追問自然延續下去。"""
+    channel_id, secret, _ = _setup(tmp_path, monkeypatch)
+    db_path = database.DB
+    _insert_conversation(db_path, channel_id, "user-1", minutes_ago=2)
+
+    asked = []
+
+    async def fake_ask_question(cid, question, line_user_id=None):
+        asked.append(question)
+        return ["【SUM】\n\n答案內容"]
+
+    async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
+        pass
+
+    async def fake_show_loading(target_id, access_token, seconds=30):
+        return True
+
+    monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
+    monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
+    monkeypatch.setattr(webhook, "show_loading", fake_show_loading)
+
+    _run_webhook(channel_id, secret, "其他5家呢？")
+
+    assert asked == ["其他5家呢？"]
+
+
+def test_stale_conversation_does_not_bypass_the_off_topic_gate(tmp_path, monkeypatch):
+    """對話紀錄如果是很久以前的（超過 `_RECENT_CONVERSATION_WINDOW`），
+    不該被當成「現在仍在同一輪對話裡」——否則使用者幾天前問過車，
+    之後隨口問一句完全無關的天氣，也會被誤判成延續話題、直接送進
+    NotebookLM，重新暴露這道關卡原本要擋的網路搜尋亂碼風險。"""
+    channel_id, secret, _ = _setup(tmp_path, monkeypatch)
+    db_path = database.DB
+    _insert_conversation(db_path, channel_id, "user-1", minutes_ago=60 * 24)  # 一天前
+
+    asked = []
+    replied = []
+
+    async def fake_ask_question(cid, question, line_user_id=None):
+        asked.append(question)
+        return ["不應該被呼叫到"]
+
+    async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
+        replied.append(text)
+
+    async def fake_show_loading(target_id, access_token, seconds=30):
+        return True
+
+    monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
+    monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
+    monkeypatch.setattr(webhook, "show_loading", fake_show_loading)
+
+    _run_webhook(channel_id, secret, "颱風會不會襲台")
+
+    assert asked == []
+    assert replied == [webhook._OFF_TOPIC_REPLY]

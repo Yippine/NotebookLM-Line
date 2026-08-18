@@ -146,6 +146,22 @@ def _is_update_kb_request(text: str) -> bool:
     return any(keyword in text for keyword in _UPDATE_KB_KEYWORDS)
 
 
+# 經銷商群組常見的「賀成交」報喜貼文（例如「賀成交！恭喜客戶入主
+# X-Trail」）本質上是同仁公告，不是在向機器人提問——但因為貼文裡
+# 常常會提到實際車型名稱，會被 `_is_car_related_question` 判定為
+# 車輛相關而觸發回覆，或被 `_PURCHASE_KEYWORDS`（例如「成交」）
+# 判定為交易意圖而導向廠商聯絡資訊，兩種回覆對這種公告貼文來說都
+# 是誤觸發、沒有意義。只要訊息中出現這裡任一個字，就整句完全不
+# 回覆（連婉拒或引導聯絡方式的訊息都不送），1:1 私訊與群組/聊天室
+# 都適用。
+_CELEBRATION_KEYWORDS = ("賀", "成交")
+
+
+def _is_celebration_message(text: str) -> bool:
+    """檢查文字是否包含「賀」「成交」這類報喜／成交公告用語。"""
+    return any(keyword in text for keyword in _CELEBRATION_KEYWORDS)
+
+
 _PURCHASE_KEYWORDS = (
     "交易", "買賣", "買", "賣", "購買", "出售", "成交", "待售", "簽約", "合約", "訂單", "報價", "議價", "付款", "下單",
     # 不含上述字詞的價格／折扣用語
@@ -261,6 +277,38 @@ async def _resolve_mention(
         return None, None
     display_name = await get_display_name(access_token, sender_user_id, group_id, room_id)
     return sender_user_id, display_name
+
+
+_RECENT_CONVERSATION_WINDOW = "-10 minutes"
+
+
+async def _has_recent_conversation(channel_id: str, line_user_id: str | None) -> bool:
+    """檢查這個 LINE 使用者在這個 channel 是否剛剛才跟機器人聊過車輛
+    相關的問題（有進行中的 NotebookLM 對話串，且最近一次互動在
+    `_RECENT_CONVERSATION_WINDOW` 之內）。
+
+    給 1:1 聊天的車輛相關性把關（見下方 `_is_car_related_question`
+    的呼叫處）用：如果對方現在仍在同一輪對話裡，單看這一則訊息本身
+    的關鍵字並不夠——追問句常常不會重複任何車輛相關字詞（真實發生
+    過的案例：機器人一次回覆了好幾家廠商的比較表，使用者追問
+    「其他5家呢？」，卻被當成跟車輛無關的問題直接打槍，因為
+    「其他」「5家」都不在關鍵字清單裡）。這種情況下不該重新套用
+    嚴格的關鍵字判斷。
+
+    刻意限制在最近一段時間內，而不是「只要曾經聊過就一路放行」——
+    否則使用者幾天前問過車、之後隨口問一句完全無關的天氣，也會被
+    誤判成延續話題、直接送進 NotebookLM，重新暴露這道關卡原本要擋
+    的網路搜尋亂碼風險（見 `_A2UI_JSON_RE` 的說明）。"""
+    if not line_user_id:
+        return False
+    async with aiosqlite.connect(DB) as db:
+        cur = await db.execute(
+            "SELECT 1 FROM user_conversations WHERE channel_id=? AND line_user_id=? "
+            "AND updated_at >= datetime('now', ?)",
+            (channel_id, line_user_id, _RECENT_CONVERSATION_WINDOW),
+        )
+        row = await cur.fetchone()
+    return row is not None
 
 
 async def _show_working_indicator(source_type: str, target_id: str, access_token: str, message: str) -> None:
@@ -387,6 +435,10 @@ async def webhook(channel_id: str, request: Request):
                     else _strip_text_mention_trigger(question)
                 )
 
+            if _is_celebration_message(question):
+                logger.info(f"[{channel_id}] Ignored celebration/deal-closed message: {question[:50]}")
+                continue
+
             # 每則訊息只解析一次，並貫穿傳遞給下面的每一次回覆，
             # 讓忙碌的群組聊天能一眼看出每個答案屬於誰的問題。
             # 在 1:1 聊天或 LINE 未提供發訊者 id 時為 None/None。
@@ -438,7 +490,16 @@ async def webhook(channel_id: str, request: Request):
             # 夾帶只有網頁版看得懂的 UI 元件描述，在 LINE 上會變成一
             # 大坨亂碼。1:1 這裡也要做同樣的把關，跟知識庫無關的問題
             # 一律當閒聊回絕，不要送進 NotebookLM。
-            if source_type == "user" and not _is_car_related_question(question):
+            #
+            # 但如果這個使用者最近才剛跟機器人聊過車（見
+            # `_has_recent_conversation`），代表現在仍在同一輪對話裡
+            # ——追問句常常不會重複任何車輛關鍵字，這種情況下不套用
+            # 嚴格的關鍵字判斷，讓對話能自然延續下去。
+            if (
+                source_type == "user"
+                and not _is_car_related_question(question)
+                and not await _has_recent_conversation(channel_id, sender_user_id)
+            ):
                 await reply_text(
                     reply_token, access_token, _OFF_TOPIC_REPLY,
                     mention_user_id, mention_display_name,

@@ -7,12 +7,18 @@ from config import settings
 def _configure_admin(monkeypatch):
     monkeypatch.setattr(settings, "admin_line_user_id", "U-admin")
     monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "telegram_chat_id", "")
     monkeypatch.setattr(alert_service, "_last_sent", {})
 
 
 def test_noop_when_admin_alerting_not_configured(monkeypatch):
     monkeypatch.setattr(settings, "admin_line_user_id", "")
     monkeypatch.setattr(settings, "admin_alert_access_token", "")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "telegram_chat_id", "")
 
     calls = []
 
@@ -88,6 +94,9 @@ def test_push_failure_is_swallowed_not_raised(monkeypatch):
 def test_sends_to_multiple_admins_when_comma_separated(monkeypatch):
     monkeypatch.setattr(settings, "admin_line_user_id", "U-admin1, U-admin2 ,U-admin3")
     monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "telegram_chat_id", "")
     monkeypatch.setattr(alert_service, "_last_sent", {})
 
     calls = []
@@ -109,6 +118,9 @@ def test_sends_to_multiple_admins_when_comma_separated(monkeypatch):
 def test_one_admins_push_failure_does_not_block_the_others(monkeypatch):
     monkeypatch.setattr(settings, "admin_line_user_id", "U-good1,U-bad,U-good2")
     monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "telegram_chat_id", "")
     monkeypatch.setattr(alert_service, "_last_sent", {})
 
     calls = []
@@ -143,3 +155,151 @@ def test_cooldown_seconds_override_bypasses_default_window(monkeypatch):
     asyncio.run(alert_service.notify_admin("nlm-health:chan-1", "second", cooldown_seconds=0))
 
     assert calls == ["first", "second"]
+
+
+def test_sends_to_google_chat_when_webhook_configured(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "https://chat.googleapis.com/v1/spaces/x/messages?key=y")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "telegram_chat_id", "")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    calls = []
+
+    async def fake_send_google_chat_message(webhook_url, text):
+        calls.append((webhook_url, text))
+
+    monkeypatch.setattr(alert_service, "send_google_chat_message", fake_send_google_chat_message)
+
+    asyncio.run(alert_service.notify_admin("some-key", "tunnel is down"))
+
+    assert calls == [("https://chat.googleapis.com/v1/spaces/x/messages?key=y", "tunnel is down")]
+
+
+def test_sends_to_both_line_and_google_chat_when_both_configured(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "U-admin")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "https://chat.googleapis.com/v1/spaces/x/messages?key=y")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "telegram_chat_id", "")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    line_calls = []
+    chat_calls = []
+
+    async def fake_push_text(user_id, access_token, text):
+        line_calls.append((user_id, text))
+
+    async def fake_send_google_chat_message(webhook_url, text):
+        chat_calls.append((webhook_url, text))
+
+    monkeypatch.setattr(alert_service, "push_text", fake_push_text)
+    monkeypatch.setattr(alert_service, "send_google_chat_message", fake_send_google_chat_message)
+
+    asyncio.run(alert_service.notify_admin("some-key", "tunnel is down"))
+
+    assert line_calls == [("U-admin", "tunnel is down")]
+    assert chat_calls == [("https://chat.googleapis.com/v1/spaces/x/messages?key=y", "tunnel is down")]
+
+
+def test_google_chat_failure_does_not_block_line_or_raise(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "U-admin")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "https://chat.googleapis.com/v1/spaces/x/messages?key=y")
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "telegram_chat_id", "")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    line_calls = []
+
+    async def fake_push_text(user_id, access_token, text):
+        line_calls.append((user_id, text))
+
+    async def failing_send_google_chat_message(webhook_url, text):
+        raise RuntimeError("Google Chat webhook is down")
+
+    monkeypatch.setattr(alert_service, "push_text", fake_push_text)
+    monkeypatch.setattr(alert_service, "send_google_chat_message", failing_send_google_chat_message)
+
+    # 即使 Google Chat 這條路徑失敗，也不應該拋出例外，且不影響 LINE 那邊送出。
+    asyncio.run(alert_service.notify_admin("some-key", "tunnel is down"))
+
+    assert line_calls == [("U-admin", "tunnel is down")]
+
+
+def test_sends_to_telegram_when_configured(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
+    monkeypatch.setattr(settings, "telegram_chat_id", "chat-id")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    calls = []
+
+    async def fake_send_telegram_message(bot_token, chat_id, text):
+        calls.append((bot_token, chat_id, text))
+
+    monkeypatch.setattr(alert_service, "send_telegram_message", fake_send_telegram_message)
+
+    asyncio.run(alert_service.notify_admin("some-key", "tunnel is down"))
+
+    assert calls == [("bot-token", "chat-id", "tunnel is down")]
+
+
+def test_sends_to_all_three_channels_when_all_configured(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "U-admin")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "https://chat.googleapis.com/v1/spaces/x/messages?key=y")
+    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
+    monkeypatch.setattr(settings, "telegram_chat_id", "chat-id")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    line_calls = []
+    chat_calls = []
+    telegram_calls = []
+
+    async def fake_push_text(user_id, access_token, text):
+        line_calls.append((user_id, text))
+
+    async def fake_send_google_chat_message(webhook_url, text):
+        chat_calls.append((webhook_url, text))
+
+    async def fake_send_telegram_message(bot_token, chat_id, text):
+        telegram_calls.append((bot_token, chat_id, text))
+
+    monkeypatch.setattr(alert_service, "push_text", fake_push_text)
+    monkeypatch.setattr(alert_service, "send_google_chat_message", fake_send_google_chat_message)
+    monkeypatch.setattr(alert_service, "send_telegram_message", fake_send_telegram_message)
+
+    asyncio.run(alert_service.notify_admin("some-key", "tunnel is down"))
+
+    assert line_calls == [("U-admin", "tunnel is down")]
+    assert chat_calls == [("https://chat.googleapis.com/v1/spaces/x/messages?key=y", "tunnel is down")]
+    assert telegram_calls == [("bot-token", "chat-id", "tunnel is down")]
+
+
+def test_telegram_failure_does_not_block_others_or_raise(monkeypatch):
+    monkeypatch.setattr(settings, "admin_line_user_id", "U-admin")
+    monkeypatch.setattr(settings, "admin_alert_access_token", "token-123")
+    monkeypatch.setattr(settings, "google_chat_webhook_url", "")
+    monkeypatch.setattr(settings, "telegram_bot_token", "bot-token")
+    monkeypatch.setattr(settings, "telegram_chat_id", "chat-id")
+    monkeypatch.setattr(alert_service, "_last_sent", {})
+
+    line_calls = []
+
+    async def fake_push_text(user_id, access_token, text):
+        line_calls.append((user_id, text))
+
+    async def failing_send_telegram_message(bot_token, chat_id, text):
+        raise RuntimeError("Telegram API is down")
+
+    monkeypatch.setattr(alert_service, "push_text", fake_push_text)
+    monkeypatch.setattr(alert_service, "send_telegram_message", failing_send_telegram_message)
+
+    # 即使 Telegram 這條路徑失敗，也不應該拋出例外，且不影響 LINE 那邊送出。
+    asyncio.run(alert_service.notify_admin("some-key", "tunnel is down"))
+
+    assert line_calls == [("U-admin", "tunnel is down")]

@@ -258,3 +258,47 @@ def test_vendor_date_filename_with_no_separator():
     assert "750 匹" in mclaren_msg
     assert bmw_msg.startswith("【BMW】")
     assert "510 匹" in bmw_msg
+
+
+def test_vendor_messages_reordered_by_most_recent_update_first():
+    """廠商訊息氣泡的出現順序，要依檔名裡的更新日期排序（最近更新的
+    廠商排最前面），而不是依文字裡第一次提到的順序——即使文字裡先
+    提到的是比較舊的廠商，訊息順序也要把它排到後面。"""
+    answer = (
+        "McLaren 750S 的最大馬力是 750 匹 [1]。\n\n"
+        "BMW M4 的最大馬力是 510 匹 [2]。\n\n"
+        "Audi RS6 的最大馬力是 600 匹 [3]。"
+    )
+    # 文字裡的提及順序是 McLaren → BMW → Audi，但更新日期最新的其實
+    # 是 Audi（20260720），其次是 BMW（20260710），McLaren 最舊。
+    source_map = {
+        1: "McLaren20260701.md",
+        2: "BMW20260710.md",
+        3: "Audi20260720.md",
+    }
+
+    messages = build_answer_messages(answer, source_map)
+
+    vendor_order = [m.split("】")[0].lstrip("【") for m in messages]
+    assert vendor_order == ["Audi", "BMW", "McLaren"]
+
+
+def test_vendor_messages_without_date_filename_sort_after_dated_vendors():
+    """檔名不符合「結尾 8 位數日期」慣例、抓不出更新日期的廠商
+    （例如舊式的 `{廠商}_...` 命名），視為最舊，排在所有有日期的
+    廠商之後；彼此之間則維持原本依文字出現順序排列。"""
+    answer = (
+        "McLaren 750S 的最大馬力是 750 匹 [1]。\n\n"
+        "BMW M4 的最大馬力是 510 匹 [2]。\n\n"
+        "Audi RS6 的最大馬力是 600 匹 [3]。"
+    )
+    source_map = {
+        1: "McLaren_型錄.md",  # 舊式命名，沒有日期
+        2: "BMW20260710.md",
+        3: "Audi_型錄.md",  # 舊式命名，沒有日期
+    }
+
+    messages = build_answer_messages(answer, source_map)
+
+    vendor_order = [m.split("】")[0].lstrip("【") for m in messages]
+    assert vendor_order == ["BMW", "McLaren", "Audi"]
