@@ -61,3 +61,14 @@ def test_random_uppercase_acronym_in_unrelated_chitchat_does_not_falsely_trigger
     不是要求它能完美排除所有巧合出現大寫字母的無關訊息。"""
     assert _is_car_related_question("午餐吃了嗎") is False
     assert _is_car_related_question("哈囉大家好") is False
+
+
+def test_lowercase_brand_and_model_from_known_list_still_triggers():
+    """重現實際發生過的真實案例：清單裡的品牌／車型名稱是
+    「Nissan」「Kicks」這種字面寫法，使用者實際輸入時常常整句
+    全小寫（例如「nissan kicks」），關鍵字比對必須不分大小寫，
+    否則會被誤判成非車輛問題而直接回絕——這個問題明明清清楚楚
+    是在問車。"""
+    assert _is_car_related_question("nissan kicks") is True
+    assert _is_car_related_question("toyota corolla altis多少錢") is True
+    assert _is_car_related_question("有沒有RAV4") is True  # 維持原本大寫也要正確判斷

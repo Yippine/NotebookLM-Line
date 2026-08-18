@@ -83,6 +83,34 @@ def test_mixed_citation_paragraph_merges_into_preceding_vendor_group():
     assert "[1, 2]" not in messages[0]
 
 
+def test_uncited_lead_in_before_multi_vendor_comparison_stays_in_place():
+    """回歸測試：重現真實發生過的案例——緊接在『多廠商比較』內容之前、
+    自己沒有引用的鋪陳句（例如「這兩款車型的核心差異如下：」），
+    必須維持在它鋪陳的那段比較內容*前面*，不能被推到訊息最後面、
+    變成一行掛在結尾、後面卻沒接著任何內容的孤兒句子。
+
+    根本原因：`_split_by_vendor` 裡引用了多個廠商的原子，會直接
+    `buckets[last_vendor].append(atom)` 接到目前的廠商分桶，卻沒有
+    先把暫存的 `pending`（這句沒有引用的鋪陳句）一併 flush 進去——
+    於是鋪陳句一路被延後到 for 迴圈結束、`pending` 才整批被接到
+    分桶最後面，順序因此被打亂。"""
+    answer = (
+        "McLaren 750S 的保固是 3 年 [1]。\n\n"
+        "中彰投汽車有限公司提供的 C250 保固是 2 年 [2]。\n\n"
+        "這兩款車型的核心差異如下：\n\n"
+        "- 保固差異：McLaren 3 年，中彰投 2 年 [1, 2]。\n"
+        "- 售價差異：McLaren 較高，中彰投較低 [1, 2]。"
+    )
+    source_map = {1: "McLaren_型錄.md", 2: "中彰投汽車有限公司_型錄.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    last_msg = messages[-1]
+    lead_pos = last_msg.index("這兩款車型的核心差異如下")
+    bullet_pos = last_msg.index("保固差異")
+    assert lead_pos < bullet_pos, "鋪陳句應該出現在它介紹的比較內容之前，而不是被推到最後"
+
+
 def test_unprefixed_filename_is_dropped_not_sent_unclassified():
     answer = "車輛的保固期是 3 年 [1]。\n\n特殊活動的折扣期限是本月底 [2]。"
     source_map = {1: "McLaren_型錄.md", 2: "notes.md"}
