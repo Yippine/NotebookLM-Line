@@ -11,7 +11,10 @@ def encrypt_channel_credentials(
 ) -> tuple[str, str]:
     """Encrypt both LINE credentials before any database write."""
 
-    return encrypt_text(channel_secret), encrypt_text(access_token)
+    return (
+        encrypt_text(_normalize_credential(channel_secret)),
+        encrypt_text(_normalize_credential(access_token)),
+    )
 
 
 def read_channel_credentials(row: Mapping[str, Any]) -> tuple[str, str]:
@@ -28,11 +31,18 @@ def _read_one(row: Mapping[str, Any], *, encrypted_name: str, legacy_name: str) 
     keys = set(row.keys())
     encrypted = row[encrypted_name] if encrypted_name in keys else None
     if encrypted:
-        return decrypt_text(encrypted)
+        return _normalize_credential(decrypt_text(encrypted))
     legacy = row[legacy_name] if legacy_name in keys else None
     if legacy:
-        return str(legacy)
+        return _normalize_credential(str(legacy))
     raise ValueError("LINE credential is unavailable")
+
+
+def _normalize_credential(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("LINE credential is unavailable")
+    return normalized
 
 
 def read_channel_secret(row: Mapping[str, Any]) -> str:

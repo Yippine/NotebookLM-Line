@@ -1,5 +1,17 @@
 # Shared Notebook Binding 驗證紀錄
 
+## 2026-08-18 V2 逾時與相依升級補充驗證
+
+- `notebooklm-py` 候選版由 `0.7.3` 精確更新為 `0.8.1`，並依 0.8.x 契約將 `chat.delete_conversation()` 改為「無例外即成功」，不再判斷已移除的布林回傳值。
+- 明確設定聊天讀取 180 秒、完整查詢生命週期 210 秒及 LINE event claim 720 秒；LINE Loading 仍每 50 秒續期 60 秒。
+- 後端完整回歸為 181 passed；前端為 23 passed，production build 通過；Python 相依稽核無已知漏洞；OpenSpec strict validation 與 Compose 設定檢查通過。
+- V2 重建後容器內確認 `notebooklm-py==0.8.1`、runtime 設定驗證成功、課程帳號健康檢查為 `healthy`。
+- 以既有 Viewer shared Notebook 執行先前會超過 90 秒的實際聊天，124.5 秒取得完整回答，未再被舊外層期限提前取消；成功後 Channel 從 `error` 恢復為 `bound`。
+- 部署後收到的三筆真實 LINE 事件均完成且沒有錯誤碼；第一筆 64 秒完成，後兩筆因在前一題完成前重複送出而包含同 Notebook 的隔離排隊時間。
+- Channel ID、Secret 與 Access Token 現在由前端送出前及後端驗證／保存前移除首尾空白；舊資料在讀取 Secret／Token 時也會正規化。使用資料庫現有憑證產生簽章的公開 Webhook smoke test 回傳 200。
+
+以上只核准本次 V2 修復；兩本 Viewer Notebook、撤銷分享、引用來源及 48 小時授權輪替等完整 PoC 尚未完成，因此 OpenSpec 1.7 仍保持未完成。
+
 - 日期：2026-07-23
 - 分支：`feature/shared-notebook-binding`
 - 環境：本機隔離 V2 容器＋獨立 Cloudflare Tunnel
@@ -54,6 +66,6 @@
 在上述阻擋條件完成前：
 
 - 不得把現行正式 LINE Channel Webhook 切到 V2。
-- `notebooklm-py==0.7.3` 只視為候選鎖定版本，不是 PoC 核准版本。
+- 2026-07-23 原始驗證使用 `notebooklm-py==0.7.3`；2026-08-18 V2 已更新為候選 `0.8.1`，仍不是完整 PoC 核准版本。
 - 不得執行舊 Google Cookie 或 LINE 明文憑證的不可逆清除。
 - 現行正式服務與資料庫應維持不變。

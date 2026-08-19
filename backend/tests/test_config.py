@@ -68,6 +68,7 @@ def test_production_rejects_disabled_security_rate_limit() -> None:
 
 def test_event_claim_lease_must_outlive_notebook_query_timeout() -> None:
     configured = _production_settings(
+        notebook_chat_timeout_seconds=60,
         notebook_query_timeout_seconds=90,
         line_event_claim_timeout_seconds=329,
     )
@@ -76,9 +77,35 @@ def test_event_claim_lease_must_outlive_notebook_query_timeout() -> None:
         configured.validate_runtime()
 
     _production_settings(
+        notebook_chat_timeout_seconds=60,
         notebook_query_timeout_seconds=90,
         line_event_claim_timeout_seconds=330,
     ).validate_runtime()
+
+
+def test_query_timeout_keeps_lifecycle_margin_after_chat_timeout() -> None:
+    configured = _production_settings(
+        notebook_chat_timeout_seconds=180,
+        notebook_query_timeout_seconds=209,
+    )
+
+    with pytest.raises(ValueError, match="NOTEBOOK_QUERY_TIMEOUT_SECONDS"):
+        configured.validate_runtime()
+
+    _production_settings(
+        notebook_chat_timeout_seconds=180,
+        notebook_query_timeout_seconds=210,
+        line_event_claim_timeout_seconds=720,
+    ).validate_runtime()
+
+
+def test_default_timeout_budget_supports_slow_shared_notebook_chat() -> None:
+    configured = Settings(_env_file=None)
+
+    assert configured.notebook_chat_timeout_seconds == 180
+    assert configured.notebook_query_timeout_seconds == 210
+    assert configured.line_event_claim_timeout_seconds == 720
+    configured.validate_runtime()
 
 
 def test_event_pending_limit_must_be_positive() -> None:

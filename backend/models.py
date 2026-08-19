@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class InviteVerify(BaseModel):
@@ -19,6 +19,12 @@ class SessionTokenOut(BaseModel):
 
 
 class ChannelCreate(BaseModel):
+    # LINE credentials copied from the Developers Console commonly include a
+    # leading/trailing space or newline.  Normalize before length validation
+    # and before any scope check, encryption, database write, or webhook URL is
+    # derived from the values.
+    model_config = ConfigDict(str_strip_whitespace=True)
+
     channel_id: str = Field(min_length=1, max_length=255)
     channel_secret: str = Field(min_length=1, max_length=2048)
     channel_access_token: str = Field(min_length=1, max_length=8192)

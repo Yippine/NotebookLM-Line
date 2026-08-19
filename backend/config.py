@@ -37,13 +37,18 @@ class Settings(BaseSettings):
     invite_code_ttl_seconds: int = 7_776_000
     notebook_query_concurrency: int = 3
     notebook_query_queue_limit: int = 20
-    notebook_query_timeout_seconds: float = 90.0
+    # Shared Notebook chats may legitimately take close to the upstream
+    # package's 180-second per-read window.  Keep a separate lifecycle margin
+    # so cleanup and rotated-cookie persistence are not cancelled at the same
+    # instant as the chat request.
+    notebook_chat_timeout_seconds: float = 180.0
+    notebook_query_timeout_seconds: float = 210.0
     line_background_task_limit: int = 100
     line_background_shutdown_timeout_seconds: float = 15.0
     line_webhook_max_body_bytes: int = 1_048_576
     line_webhook_max_events_per_request: int = 100
     line_event_dedupe_retention_seconds: int = 604_800
-    line_event_claim_timeout_seconds: int = 360
+    line_event_claim_timeout_seconds: int = 720
     line_event_pending_limit: int = 5_000
     line_event_pending_per_channel_limit: int = 50
     line_event_replay_per_channel_batch: int = 10
@@ -135,8 +140,16 @@ class Settings(BaseSettings):
             raise ValueError("NOTEBOOK_QUERY_CONCURRENCY must be at least 1")
         if self.notebook_query_queue_limit < 0:
             raise ValueError("NOTEBOOK_QUERY_QUEUE_LIMIT cannot be negative")
+        if self.notebook_chat_timeout_seconds <= 0:
+            raise ValueError("NOTEBOOK_CHAT_TIMEOUT_SECONDS must be positive")
         if self.notebook_query_timeout_seconds <= 0:
             raise ValueError("NOTEBOOK_QUERY_TIMEOUT_SECONDS must be positive")
+        minimum_query_timeout = self.notebook_chat_timeout_seconds + 30
+        if self.notebook_query_timeout_seconds < minimum_query_timeout:
+            raise ValueError(
+                "NOTEBOOK_QUERY_TIMEOUT_SECONDS must include at least a 30-second "
+                "lifecycle margin beyond NOTEBOOK_CHAT_TIMEOUT_SECONDS"
+            )
         if self.line_background_task_limit < 1:
             raise ValueError("LINE_BACKGROUND_TASK_LIMIT must be at least 1")
         if self.line_background_shutdown_timeout_seconds < 0:

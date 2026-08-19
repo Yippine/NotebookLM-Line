@@ -30,16 +30,20 @@ describe("protected API client", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await createChannel("setup-secret", {
-      channel_id: "channel-a",
-      channel_secret: "line-secret",
-      channel_access_token: "line-token",
+      channel_id: "  channel-a\n",
+      channel_secret: "\tline-secret ",
+      channel_access_token: " line-token\r\n",
     });
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/api/channels");
     expect(url).not.toContain("setup-secret");
     expect(new Headers(init.headers).get("Authorization")).toBe("Bearer setup-secret");
-    expect(init.body).toContain("line-secret");
+    expect(JSON.parse(String(init.body))).toEqual({
+      channel_id: "channel-a",
+      channel_secret: "line-secret",
+      channel_access_token: "line-token",
+    });
   });
 
   it("submits the admin password in JSON and never in the URL", async () => {

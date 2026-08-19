@@ -6,8 +6,24 @@ import logging
 
 import pytest
 
+from services.channel_credentials import (
+    read_channel_access_token,
+    read_channel_secret,
+)
 from services.logging_service import SensitiveDataFilter, sanitize_for_log
 from services.rate_limit_service import InMemoryRateLimiter
+
+
+def test_legacy_line_credentials_are_trimmed_when_read() -> None:
+    row = {
+        "channel_secret_encrypted": None,
+        "channel_secret": "  line-secret\n",
+        "channel_access_token_encrypted": None,
+        "channel_access_token": "\tline-token ",
+    }
+
+    assert read_channel_secret(row) == "line-secret"
+    assert read_channel_access_token(row) == "line-token"
 
 
 def test_sensitive_logging_filter_redacts_supported_secret_shapes():

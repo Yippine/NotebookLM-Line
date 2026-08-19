@@ -247,8 +247,8 @@ export default function SetupPage() {
     try {
       const response = await createChannel(token, {
         channel_id: channelId.trim(),
-        channel_secret: channelSecret,
-        channel_access_token: accessToken,
+        channel_secret: channelSecret.trim(),
+        channel_access_token: accessToken.trim(),
       });
       setWebhookUrl(response.webhook_url);
       setChannelId(response.channel_id);
@@ -450,18 +450,18 @@ export default function SetupPage() {
         {step === 0 && (
           <form onSubmit={handleChannelSubmit} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-warm-600 uppercase tracking-wider mb-2">LINE Channel ID</label>
-              <input className="input-tactile" value={channelId} onChange={(event) => setChannelId(event.target.value)} required autoComplete="off" />
+              <label htmlFor="line-channel-id" className="block text-xs font-semibold text-warm-600 uppercase tracking-wider mb-2">LINE Channel ID</label>
+              <input id="line-channel-id" className="input-tactile" value={channelId} onChange={(event) => setChannelId(event.target.value)} required autoComplete="off" />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-warm-600 uppercase tracking-wider mb-2">Channel Secret</label>
-              <input className="input-tactile" type="password" value={channelSecret} onChange={(event) => setChannelSecret(event.target.value)} required autoComplete="new-password" />
+              <label htmlFor="line-channel-secret" className="block text-xs font-semibold text-warm-600 uppercase tracking-wider mb-2">Channel Secret</label>
+              <input id="line-channel-secret" className="input-tactile" type="password" value={channelSecret} onChange={(event) => setChannelSecret(event.target.value)} required autoComplete="new-password" />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-warm-600 uppercase tracking-wider mb-2">Channel Access Token</label>
-              <input className="input-tactile" type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} required autoComplete="new-password" />
+              <label htmlFor="line-access-token" className="block text-xs font-semibold text-warm-600 uppercase tracking-wider mb-2">Channel Access Token</label>
+              <input id="line-access-token" className="input-tactile" type="password" value={accessToken} onChange={(event) => setAccessToken(event.target.value)} required autoComplete="new-password" />
             </div>
-            <p className="text-xs text-warm-500">Secret 與 Access Token 送出後不會在頁面顯示或保存於瀏覽器。</p>
+            <p className="text-xs text-warm-500">系統會自動移除三個欄位首尾的空白與換行；Secret 與 Access Token 送出後不會在頁面顯示或保存於瀏覽器。</p>
             <ErrorBanner />
             <button type="submit" disabled={busy !== null} className="btn-primary">
               {busy === "channel" ? <span className="flex items-center justify-center gap-2"><Spinner />建立中</span> : "建立 Channel"}

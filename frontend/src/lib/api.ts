@@ -178,10 +178,15 @@ export async function createChannel(
   token: string,
   data: { channel_id: string; channel_secret: string; channel_access_token: string },
 ): Promise<{ channel_id: string; webhook_url: string }> {
+  const normalized = {
+    channel_id: data.channel_id.trim(),
+    channel_secret: data.channel_secret.trim(),
+    channel_access_token: data.channel_access_token.trim(),
+  };
   const res = await fetch(`${BASE}/channels`, {
     method: "POST",
     headers: bearer(token, true),
-    body: JSON.stringify(data),
+    body: JSON.stringify(normalized),
   });
   return handleResponse(res);
 }

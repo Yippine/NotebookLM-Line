@@ -50,7 +50,8 @@ V2 目前是單一 backend process／replica 架構：SQLite durable outbox 的�
 - `NOTEBOOK_HOST_ALLOWLIST`：只允許已驗證的 NotebookLM 官方 host。
 - `SHARED_NOTEBOOK_BINDING_ENABLED=true`
 - `LEGACY_NLM_BINDING_ENABLED=false`；只有受控遷移時才暫時啟用。
-- `LINE_EVENT_CLAIM_TIMEOUT_SECONDS` 至少為三倍 `NOTEBOOK_QUERY_TIMEOUT_SECONDS` 再加 60 秒；預設 360 秒，過短會被拒絕啟動。
+- `NOTEBOOK_CHAT_TIMEOUT_SECONDS` 是 NotebookLM 串流聊天的單次讀取上限，預設 180 秒；`NOTEBOOK_QUERY_TIMEOUT_SECONDS` 是包含 client 建立、聊天、對話清理與授權寫回的整體上限，預設 210 秒，必須至少多保留 30 秒生命週期餘裕。
+- `LINE_EVENT_CLAIM_TIMEOUT_SECONDS` 至少為三倍 `NOTEBOOK_QUERY_TIMEOUT_SECONDS` 再加 60 秒；目前預設 720 秒，過短會被拒絕啟動。
 - `LINE_WEBHOOK_MAX_BODY_BYTES` 與 `LINE_WEBHOOK_MAX_EVENTS_PER_REQUEST` 限制單次 Webhook 的原始 body 與事件數；超過時會在寫入工作帳本前拒絕，nginx 的 `/webhook/` 也設為 1 MiB 上限。
 - `LINE_EVENT_PENDING_LIMIT` 與 `LINE_EVENT_PENDING_PER_CHANNEL_LIMIT` 分別限制全站與單一 Channel 的加密待處理工作；單一 Channel 滿載時不會占用所有學員容量。
 - `LINE_EVENT_REPLAY_PER_CHANNEL_BATCH`、`LINE_EVENT_MAX_ATTEMPTS`、`LINE_EVENT_RETRY_BASE_SECONDS` 與 `LINE_EVENT_REPLAY_INTERVAL_SECONDS` 控制公平分批、重試及排程；帳本滿載時 Webhook 回 503，不接受無界工作。

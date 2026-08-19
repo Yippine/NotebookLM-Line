@@ -343,6 +343,7 @@ async def test_default_client_context_reads_rotated_cookies_and_removes_temp_fil
     monkeypatch,
 ):
     captured_path = None
+    captured_options = None
 
     class FakeStorageContext:
         def __init__(self, path):
@@ -363,7 +364,9 @@ async def test_default_client_context_reads_rotated_cookies_and_removes_temp_fil
 
     class FakeNotebookLMClient:
         @classmethod
-        def from_storage(cls, path, **_kwargs):
+        def from_storage(cls, path, **kwargs):
+            nonlocal captured_options
+            captured_options = kwargs
             return FakeStorageContext(path)
 
     monkeypatch.setitem(
@@ -381,6 +384,11 @@ async def test_default_client_context_reads_rotated_cookies_and_removes_temp_fil
     assert payload["cookies"][0]["value"] == "rotated"
     assert payload.persistence_error is None
     assert captured_path is not None and not os.path.exists(captured_path)
+    assert captured_options == {
+        "timeout": 1,
+        "chat_timeout": settings.notebook_chat_timeout_seconds,
+        "max_concurrent_rpcs": 1,
+    }
 
 
 @pytest.mark.anyio

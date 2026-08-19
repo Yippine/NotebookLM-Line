@@ -341,7 +341,7 @@ class ChannelBindingRepository:
 class StatelessConversationIsolation:
     """Serialize and clean NotebookLM's account-global current conversation.
 
-    notebooklm-py 0.7.3 documents that ``conversation_id=None`` continues the
+    notebooklm-py documents that ``conversation_id=None`` continues the
     account's current conversation for a notebook.  Therefore a mere
     ``(channel, user) -> conversation_id`` cache does *not* isolate each
     user's first question.  The safe first version is stateless: under a
@@ -370,9 +370,10 @@ class StatelessConversationIsolation:
     ) -> Any:
         current_id = await client.chat.get_conversation_id(notebook_id)
         if current_id:
-            deleted = await client.chat.delete_conversation(notebook_id, current_id)
-            if not deleted:
-                raise NotebookServiceError("conversation_isolation_failed")
+            # Since notebooklm-py 0.8.0, successful deletion returns None and
+            # failures raise.  Do not treat the intentionally empty return as
+            # a failed isolation step.
+            await client.chat.delete_conversation(notebook_id, current_id)
 
         result: Any | None = None
         primary_error: BaseException | None = None
@@ -394,11 +395,9 @@ class StatelessConversationIsolation:
                 if not conversation_id:
                     conversation_id = await client.chat.get_conversation_id(notebook_id)
                 if conversation_id:
-                    deleted = await client.chat.delete_conversation(
+                    await client.chat.delete_conversation(
                         notebook_id, str(conversation_id)
                     )
-                    if not deleted:
-                        raise NotebookServiceError("conversation_cleanup_failed")
             except BaseException as cleanup_error:
                 if primary_error is None:
                     raise

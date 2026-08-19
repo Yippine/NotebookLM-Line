@@ -291,6 +291,11 @@ async def default_client_context(
         async with NotebookLMClient.from_storage(
             path,
             timeout=timeout_seconds,
+            # notebooklm-py 0.8.x otherwise floors the automatic chat timeout
+            # at the general HTTP timeout.  Keep this explicit and below the
+            # outer lifecycle deadline so conversation cleanup and auth-state
+            # persistence still get a chance to finish.
+            chat_timeout=settings.notebook_chat_timeout_seconds,
             max_concurrent_rpcs=1,
         ) as client:
             yield client
@@ -753,7 +758,7 @@ course_account_repository = CourseAccountRepository()
 notebook_client_factory = CentralNotebookClientFactory(
     max_concurrency=getattr(settings, "notebook_query_concurrency", 2),
     max_queue_size=getattr(settings, "notebook_query_queue_limit", 20),
-    timeout_seconds=getattr(settings, "notebook_query_timeout_seconds", 60.0),
+    timeout_seconds=getattr(settings, "notebook_query_timeout_seconds", 210.0),
 )
 course_account_service = CourseAccountService(
     course_account_repository, notebook_client_factory

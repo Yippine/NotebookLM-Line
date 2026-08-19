@@ -6,6 +6,6 @@ python-dotenv
 python-multipart
 cryptography
 httpx
-# Candidate locked for the V2 adapter and mock compatibility tests.
+# Stable candidate locked for the V2 adapter and compatibility tests.
 # Keep OpenSpec PoC task 1.7 open until real Viewer-shared notebooks pass.
-notebooklm-py==0.7.3
+notebooklm-py==0.8.1

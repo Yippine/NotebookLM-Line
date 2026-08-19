@@ -513,7 +513,8 @@ async def test_stateless_conversation_removes_old_and_new_context() -> None:
         async def delete_conversation(self, notebook_id: str, conversation_id: str):
             calls.append((notebook_id, conversation_id))
             self.current = None
-            return True
+            # notebooklm-py >= 0.8.0 returns None on successful deletion.
+            return None
 
         async def ask(self, _notebook_id: str, _question: str):
             self.current = "new-conversation"

@@ -1,6 +1,8 @@
 # `notebooklm-py` 版本鎖定與升級清單
 
-`notebooklm-py` 是非官方整合。正式相依檔必須鎖定精確 stable 版本；目前查核到的候選 stable 為 `0.7.3`，但在真實 Viewer shared Notebook PoC 通過前，不得標示為已驗證版本。
+`notebooklm-py` 是非官方整合。正式相依檔必須鎖定精確 stable 版本；2026-08-18 查核到的候選 stable 為 `0.8.1`，但在真實 Viewer shared Notebook PoC 通過前，不得標示為已驗證版本。
+
+從 0.7.x 升到 0.8.x 時，`chat.delete_conversation()` 成功後改為回傳 `None`，失敗則拋出例外；呼叫端不得再以布林回傳值判斷成功。0.8.1 的自動 chat timeout 也會以一般 HTTP timeout 作為下限，因此本服務必須明確傳入獨立的 `chat_timeout`，並在外層查詢期限保留清理與授權寫回餘裕。
 
 ## 第一次鎖定前
 
