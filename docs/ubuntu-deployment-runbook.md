@@ -49,6 +49,8 @@ ADMIN_LINE_USER_ID=<要收告警的人的 LINE userId，可逗號分隔多人>
 ADMIN_ALERT_ACCESS_TOKEN=<任一已綁定頻道的 channel access token>
 ```
 
+管理員告警預設走 LINE push，額外還能加開 Google Chat、Telegram 兩條管道（三者互不影響、可以只開其中一種也可以三個都開）——設定方式見第 9 步，不是部署當下就一定要做，先留空即可。
+
 ## 3. 啟動 Docker 服務
 
 ```bash
@@ -58,6 +60,8 @@ curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8083/   # 應該回 2
 ```
 
 `8083` 這個 port 是 `docker-compose.yml` 裡 `APP_PORT` 的預設值，可在 `.env` 加一行 `APP_PORT=xxxx` 覆蓋。
+
+這是**第一次**啟動、容器還不存在的情況，直接用 `docker compose` 沒問題。**之後**只要是「程式碼有更新、backend 容器本來就已經在跑」的重新部署，一律改用第 10 步的 `scripts/deploy_backend.py`，不要再直接下 `docker compose build/up`——原因見第 10 步。
 
 ## 4. 啟用 Tailscale Funnel（一次性設定，之後網址不會再變）
 
@@ -185,6 +189,81 @@ crontab -e
 
 這支腳本檢查到異常時只會通知，實際修復（Docker Desktop/daemon 掛掉、Tailscale 服務掛掉）還是要人到主機前處理。
 
+## 9. 管理員告警：加開 Google Chat / Telegram 管道（可選）
+
+第 2 步的 `ADMIN_LINE_USER_ID` / `ADMIN_ALERT_ACCESS_TOKEN` 已經足以讓所有告警（NotebookLM 查詢失敗、第 8 步的健康檢查異常、cookie 續期失敗等——全部都是同一個 `alert_service.notify_admin` 出口）用 LINE push 送出。以下兩條是**額外**的管道，三者彼此獨立、任一個沒填就自動不啟用該管道，不影響其他管道：
+
+- **不佔用 LINE 官方帳號的每月訊息額度**——告警量大時尤其有感。
+- 收告警的人不需要是任何 LINE 官方帳號的好友，避免漏加好友導致收不到告警。
+
+兩條都是選配，看情況挑一個或兩個都開即可。
+
+### Google Chat（走 Incoming Webhook）
+
+在要接收告警的 Google Chat 空間裡，點「應用程式和整合」→「新增 Webhook」，取得一組網址，填入：
+
+```env
+GOOGLE_CHAT_WEBHOOK_URL=https://chat.googleapis.com/v1/spaces/xxx/messages?key=xxx&token=xxx
+```
+
+**注意**：這個「新增 Webhook」功能目前只開放給 Google Workspace 帳號建立的空間。如果空間是用個人 Gmail 帳號建立的，通常會顯示「Webhook 管理功能受到限制」而拿不到網址——這種情況請改用下面的 Telegram。
+
+驗證（直接對網址發一則測試訊息，不需要重啟服務）：
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"text": "測試訊息，收到請忽略"}' \
+  "$GOOGLE_CHAT_WEBHOOK_URL"
+```
+
+### Telegram（走 Bot API）
+
+個人帳號就能申請，不像 Google Chat 的 Webhook 管理只開放給 Workspace 帳號：
+
+1. 在 Telegram 跟 [@BotFather](https://t.me/BotFather) 對話，用 `/newbot` 建立一個 bot，依指示取得一組 token（即 `TELEGRAM_BOT_TOKEN`）。
+2. 跟這個新建立的 bot 隨便傳一句話（**這一步不能省**——bot 沒被主動私訊過，下一步的 API 拿不到任何資料）。
+3. 瀏覽器打開 `https://api.telegram.org/bot<TOKEN>/getUpdates`（`<TOKEN>` 換成上一步拿到的），從回應的 JSON 裡找 `"chat":{"id": ...}`，這組數字就是 `TELEGRAM_CHAT_ID`。
+
+```env
+TELEGRAM_BOT_TOKEN=123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TELEGRAM_CHAT_ID=123456789
+```
+
+驗證：
+
+```bash
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+  -H "Content-Type: application/json" \
+  -d "{\"chat_id\": \"$TELEGRAM_CHAT_ID\", \"text\": \"測試訊息，收到請忽略\"}"
+```
+
+### 套用設定
+
+改完 `backend/.env` 後跟第 4 步改 `WEBHOOK_BASE_URL` 一樣，要重啟後端才會讀到新值：
+
+```bash
+docker compose up -d backend
+```
+
+這裡只是重讀 `.env`、沒有動到程式碼，用 `docker compose` 直接重啟沒問題；如果你同時也有 pull 新程式碼，改用下一步的部署腳本即可，它一樣會重啟後端套用新的 `.env`。
+
+## 10. 日常部署：之後程式碼有更新時
+
+前面 1-9 步都是**一次性設定**，只有第一次架站時要做。之後每次 `git pull` 到新程式碼要上線，固定用這支腳本，不要再手動下 `docker compose build/up`：
+
+```bash
+cd /path/to/NotebookLM-Line
+git pull
+python3 scripts/deploy_backend.py
+```
+
+它比直接下 `docker compose` 多做兩件事，兩件都是真實事故換來的教訓：
+
+1. **部署前檢查有沒有問題正在處理中**：backend 是同步阻塞式處理每個問題，收到訊息會一路等到 NotebookLM 查完才回覆（實測過最久 5 分半）。這段期間如果容器被重啟，查詢會被無聲打斷，使用者什麼都收不到、也不會有任何告警——2026-08-11/12 已經真的發生過兩次。腳本會先看最近的 log 有沒有問題還沒跑完，有的話先等，不會直接動手重啟。
+2. **部署後自動重推 NotebookLM 人設**：`services/nlm_service.py` 裡的 `RESTRICTED_TOPIC_CUSTOM_PROMPT`（拒答規則、排版規則等）只有在筆記本「首次綁定」或「切換筆記本」時才會真正推送到 NotebookLM 那邊生效——單純改這段文字、重新部署，並不會讓已經綁定的 channel 自動套用新版。如果用 `docker compose` 直接重啟，這段文字更新完全不會生效，除非有人事後想到要手動呼叫 `/api/channels/{channel_id}/refresh-guard`（這是真實發生過的落差：改完排版規則、部署了，但已綁定的 channel 一直吐舊格式，因為沒有人手動重推）。腳本會在重啟成功後，自動對資料庫裡每一個已綁定 channel 呼叫這支 API，不需要記得手動做。
+
+如果只是改 `.env`（沒有動程式碼），直接 `docker compose up -d backend` 重啟即可，不需要跑這支腳本——它的兩個保護都是針對「程式碼／prompt 有變動」的情境。
+
 ## 檢查清單
 
 - [ ] `docker compose ps` 兩個容器都 Up
@@ -195,3 +274,5 @@ crontab -e
 - [ ] `nlm_cookie_refresh.py` 手動跑過一次成功，cron 已排好
 - [ ] `service_health_check.py` 手動跑過一次成功，cron 已排好
 - [ ] `backend/.env` 的 `ADMIN_LINE_USER_ID` / `ADMIN_ALERT_ACCESS_TOKEN` 已填，且你本人已加該 LINE 官方帳號好友（收得到告警 push）
+- [ ] （可選）Google Chat / Telegram 告警管道已依第 9 步設定並測試收得到訊息
+- [ ] 之後的程式碼部署一律用 `python3 scripts/deploy_backend.py`（見第 10 步），不要直接下 `docker compose build/up` 略過查詢等待與人設重推

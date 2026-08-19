@@ -134,3 +134,78 @@ def test_successful_ask_after_expired_flips_status_back_to_healthy(tmp_path, mon
 
     assert messages  # 確認提問真的成功了
     assert _read_health_status(db_path, channel_id) == "healthy"
+
+
+class _FakeNotebook:
+    def __init__(self, id, title):
+        self.id = id
+        self.title = title
+
+
+class _FakeNotebooksAPI:
+    async def list(self):
+        return [_FakeNotebook("notebook-1", "示範筆記本")]
+
+
+class _FakeChatConfigureAPI:
+    async def configure(self, notebook_id, goal=None, custom_prompt=None):
+        return None
+
+
+def test_successful_rebind_flips_expired_status_back_to_healthy(tmp_path, monkeypatch):
+    """回歸測試：channel 原本被標成 expired，scripts/nlm_cookie_refresh.py
+    偵測到之後自動重新綁定（呼叫的正是 bind_nlm，跟使用者手動重新登入
+    走同一條路）——重新綁定當下已經用新的認證資訊實際打過一次
+    list_notebooks() 並且成功了，nlm_health_status 應該立刻改回
+    healthy，不能維持在上一次留下的 expired。
+
+    根本原因：bind_nlm() 原本只更新 nlm_auth_json_encrypted / notebook_id，
+    完全沒碰 nlm_health_status——cookie 明明已經刷新成功，這個欄位卻
+    一直卡在 expired，直到剛好某次排程健康檢查或剛好有人問了問題才會
+    被動清掉，中間這段空窗期會讓下一次健康檢查（例如每次部署重啟後端
+    都會立刻做一次）誤以為又是一次新的失效、重複發出告警，讓管理員
+    感覺不管 cookie 續期成功還是失敗都一直收到通知。"""
+    chat = _FakeChatConfigureAPI()
+    channel_id, db_path = _setup(tmp_path, monkeypatch, chat, initial_health_status="expired")
+
+    client = nlm_service._client_cache.get(channel_id)
+    # bind_nlm 用的是 NotebookLMClient.from_storage()（見 _install_fake_client），
+    # 跟 ask_question 快取的 client 是分開的一條路，這裡幫它補上
+    # bind_nlm 會用到的 .notebooks 屬性。
+    monkeypatch.setattr(
+        nlm_service,
+        "NotebookLMClient",
+        type(
+            "_FakeNotebookLMClient",
+            (),
+            {
+                "from_storage": staticmethod(
+                    lambda: _FakeBindStorageContext(chat)
+                )
+            },
+        ),
+    )
+
+    notebook_id, notebooks = asyncio.run(
+        nlm_service.bind_nlm(channel_id, {"cookies": []})
+    )
+
+    assert notebook_id == "notebook-1"
+    assert _read_health_status(db_path, channel_id) == "healthy"
+
+
+class _FakeBindClient:
+    def __init__(self, chat):
+        self.chat = chat
+        self.notebooks = _FakeNotebooksAPI()
+
+
+class _FakeBindStorageContext:
+    def __init__(self, chat):
+        self._client = _FakeBindClient(chat)
+
+    async def __aenter__(self):
+        return self._client
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return None

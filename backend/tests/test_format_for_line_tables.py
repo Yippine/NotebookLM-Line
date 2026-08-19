@@ -382,17 +382,21 @@ def test_same_model_compared_across_vendors_transposes_into_one_bubble_per_vendo
 
     messages = build_answer_messages(format_for_line(answer), source_map)
 
-    # 開場白自己一則，接著兩家廠商各自一則——不是逐項目交錯的單一表格。
-    assert len(messages) == 3
-    assert messages[1].startswith("【中彰投汽車有限公司】")
-    assert "車型年份：2020 年" in messages[1]
-    assert "建議售價：32.8 萬" in messages[1]
-    assert messages[2].startswith("【安心汽車】")
-    assert "車型年份：2025 年" in messages[2]
-    assert "建議售價：62.8 萬" in messages[2]
+    # 接著兩家廠商各自一則——不是逐項目交錯的單一表格。開場白本身
+    # 點名了「中彰投汽車有限公司」與「安心汽車」這兩家等一下就會
+    # 各自變成一則【廠商】訊息的廠商，屬於重複資訊，會被拿掉（見
+    # `_split_by_vendor` 裡的說明），不會有獨立的第三則開頭訊息。
+    assert len(messages) == 2
+    assert not any("共有 2 台 Nissan Kicks" in m for m in messages)
+    assert messages[0].startswith("【中彰投汽車有限公司】")
+    assert "車型年份：2020 年" in messages[0]
+    assert "建議售價：32.8 萬" in messages[0]
+    assert messages[1].startswith("【安心汽車】")
+    assert "車型年份：2025 年" in messages[1]
+    assert "建議售價：62.8 萬" in messages[1]
     # 沒有任何一則訊息把兩家廠商的資料混在同一段裡。
-    assert "安心汽車" not in messages[1]
-    assert "中彰投汽車有限公司" not in messages[2]
+    assert "安心汽車" not in messages[0]
+    assert "中彰投汽車有限公司" not in messages[1]
 
 
 def test_redundant_vendor_name_field_within_each_transposed_item_is_dropped():

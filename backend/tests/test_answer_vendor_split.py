@@ -242,6 +242,47 @@ def test_overall_intro_becomes_standalone_leading_message():
     assert "根據來源文件" not in vendor_msg
 
 
+def test_lead_in_naming_vendors_that_get_their_own_message_is_dropped():
+    """回歸測試：重現真實發生過的案例——開場白直接點名了本回答會
+    各自拆成獨立訊息的廠商（例如「目前在庫車輛中，賓士 GLC200 共有
+    2 台現車，分別由福大汽車 與 永大國際汽車有限公司 提供。」），
+    這句話會在後面拆出的兩則【廠商】訊息裡逐一重複出現一次，是
+    多餘的雜訊——即使人設 prompt 已經要求模型不要生成這種開場白，
+    模型仍偶爾不遵守，這裡改用程式碼把它擋掉，不能只靠 prompt。"""
+    answer = (
+        "目前在庫車輛中，賓士 GLC200 共有 2 台現車，"
+        "分別由福大汽車 與 永大國際汽車有限公司 提供。\n\n"
+        "車型：Benz GLC200 [1]。\n\n"
+        "車型：Benz GLC-CLASS 【GLC200 4MATIC】[2]。"
+    )
+    source_map = {1: "福大汽車_20260817.md", 2: "永大國際汽車有限公司_20260817.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 2
+    assert not any("共有 2 台現車" in m for m in messages)
+    assert not any(m.startswith("目前在庫車輛中") for m in messages)
+    vendor_msg1, vendor_msg2 = messages
+    assert vendor_msg1.startswith("【福大汽車】")
+    assert vendor_msg2.startswith("【永大國際汽車有限公司】")
+
+
+def test_lead_in_without_vendor_names_still_kept_standalone():
+    """對照組：開場白如果沒有點名任何廠商，維持既有行為——原封不動
+    保留成獨立的開頭訊息，不受上面那條新規則影響。"""
+    answer = (
+        "根據來源資料，以下是相關資訊：\n\n"
+        "McLaren 750S 的最大馬力是 750 匹 [1]。\n\n"
+        "BMW M4 的最大馬力是 510 匹 [2]。"
+    )
+    source_map = {1: "McLaren_型錄.md", 2: "BMW_型錄.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 3
+    assert messages[0] == "根據來源資料，以下是相關資訊："
+
+
 def test_vendor_date_filename_with_no_separator():
     """新的命名慣例：{廠商}{西元年月日}.md，例如 McLaren20260715.md。"""
     answer = (

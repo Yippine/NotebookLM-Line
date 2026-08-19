@@ -652,7 +652,22 @@ def _split_by_vendor(
 
         return f"【{vendor}】\n\n{rendered}"
 
-    messages = [_render_atoms(lead_atoms)] if lead_atoms else []
+    # 開場白如果直接點名了「等一下就會各自變成一則【廠商】訊息」的
+    # 廠商（例如「目前在庫車輛中，賓士 GLC200 共有 2 台現車，分別由
+    # 福大汽車 與 永大國際汽車有限公司 提供。」），這句話本身的資訊
+    # 會在後面每一則廠商訊息各自重複出現一次——這是真實發生過的
+    # 案例，即使人設 prompt 已經明確要求模型不要生成這種廠商總覽
+    # 開場白，模型仍然會偶爾不遵守。與其完全依賴 prompt 生效，這裡
+    # 用「開場白是否提到了本回答任一家廠商的名稱」當作判斷依據，
+    # 直接把這種開場白拿掉，不送給使用者——這個條件刻意只鎖定
+    # 「點名了廠商」的句子，不影響單純鋪陳、沒有提到任何廠商名稱的
+    # 開場白（例如「根據來源資料，以下是相關資訊：」），那些仍然
+    # 保留成獨立的開頭訊息。
+    lead_message = _render_atoms(lead_atoms) if lead_atoms else None
+    if lead_message and any(vendor in lead_message for vendor in order):
+        lead_message = None
+
+    messages = [lead_message] if lead_message else []
     messages.extend(_build_vendor_message(vendor) for vendor in order)
     return messages
 

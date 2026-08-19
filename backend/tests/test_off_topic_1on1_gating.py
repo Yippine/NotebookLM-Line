@@ -5,6 +5,8 @@ import hmac
 import json
 import sqlite3
 
+from fastapi import BackgroundTasks
+
 import database
 import routers.webhook as webhook
 
@@ -55,11 +57,25 @@ def _text_event(question: str, source_type: str = "user") -> dict:
     }
 
 
+async def _call_webhook_and_run_background_tasks(channel_id, request):
+    """webhook() 現在只把每個事件排進 background_tasks、不在請求
+    處理期間 await 它們（見 routers/webhook.py 裡的說明：不想讓
+    webhook 的回應卡在 NotebookLM 查詢完成之前）。真正的 FastAPI
+    TestClient 在回應送出後會自動接著執行這些背景任務，但這裡是
+    直接呼叫 route function、繞過整個 ASGI 流程，所以要自己補上
+    這一步——否則測試只驗證得到「排進去了」，驗證不到「實際執行的
+    結果」（有沒有回覆、有沒有呼叫 ask_question）。"""
+    background_tasks = BackgroundTasks()
+    result = await webhook.webhook(channel_id, request, background_tasks)
+    await background_tasks()
+    return result
+
+
 def _run_webhook(channel_id, secret, question, source_type="user"):
     payload = {"events": [_text_event(question, source_type)]}
     body = json.dumps(payload).encode("utf-8")
     request = _FakeRequest(body, _sign(body, secret))
-    return asyncio.run(webhook.webhook(channel_id, request))
+    return asyncio.run(_call_webhook_and_run_background_tasks(channel_id, request))
 
 
 def test_off_topic_question_in_1on1_chat_is_declined_without_reaching_notebooklm(tmp_path, monkeypatch):

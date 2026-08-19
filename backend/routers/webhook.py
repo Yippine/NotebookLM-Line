@@ -3,7 +3,7 @@ import hmac
 import base64
 import logging
 import re
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Request, HTTPException
 import aiosqlite
 from config import settings
 from database import DB
@@ -331,7 +331,18 @@ async def _show_working_indicator(source_type: str, target_id: str, access_token
 
 
 @router.post("/webhook/{channel_id}")
-async def webhook(channel_id: str, request: Request):
+async def webhook(channel_id: str, request: Request, background_tasks: BackgroundTasks):
+    """接收 LINE 的 webhook 事件。
+
+    這個 handler 本身只做「驗證這個請求、把每個事件排進背景任務」，
+    真正回答問題（可能要等 NotebookLM 查詢完成，實測過最久 5 分半）
+    一律丟給 background_tasks 執行，不在這裡 await——LINE 對 webhook
+    的回應有嚴格的時間限制，過去這裡是整個處理完才回應，查詢一慢
+    LINE 那端就會判定逾時／失敗（nginx 側可觀察到 499），而且 LINE
+    本身有內部的 webhook 品質評分機制，回應慢/常失敗的端點之後可能
+    被延遲或跳過投遞，形成「明明服務正常，訊息卻偶爾送不到」的假象。
+    背景任務仍然在同一個 event loop、回應送出後幾乎立刻就開始執行，
+    不會因此拖慢 reply_token 的新鮮度。"""
     body = await request.body()
 
     # 查詢 channel
@@ -369,13 +380,13 @@ async def webhook(channel_id: str, request: Request):
     # webhook 請求裡的多個 message event，各自帶有各自的
     # reply_token。整批先處理掉，才能只顯示一次「正在更新」提示、
     # 合併成一則完成通知，而不是每個檔案各自洗一次版（見
-    # _handle_file_batch）。
+    # _handle_file_batch）——排進背景任務，理由同上，不在這裡 await。
     file_events = [
         e for e in events
         if e.get("type") == "message" and e.get("message", {}).get("type") == "file"
     ]
     if file_events:
-        await _handle_file_batch(channel_id, access_token, file_events)
+        background_tasks.add_task(_handle_file_batch, channel_id, access_token, file_events)
 
     for event in events:
         if event.get("type") != "message":
@@ -385,137 +396,145 @@ async def webhook(channel_id: str, request: Request):
         if message.get("type") == "file":
             continue  # 已經在上面整批處理過了
 
-        reply_token = event["replyToken"]
-        source = event["source"]
-        source_type = source.get("type")  # "user" | "group" | "room"
-        message_type = message.get("type")
-        logger.info(f"[{channel_id}] Event payload: {event}")
-        """
-         在群組/聊天室中，只回應「文字」訊息，且該訊息必須是合理的
-         購車諮詢問題（見 _is_car_related_question）或明確 @提及了
-         機器人——@mention 這條路徑保留作為關鍵字清單漏接時的備援，
-         而不是必要條件。1:1 聊天則兩者都不需要。檔案訊息在 LINE
-         上永遠不可能帶有 @mention，所以這道門檻不適用於它們——
-         群組/聊天室中傳送的任何檔案都會被視為更新請求。
-        """
-        if source_type in ("group", "room") and message_type == "text":
+        background_tasks.add_task(_handle_message_event, channel_id, access_token, event)
+
+    return {"status": "ok"}
+
+
+async def _handle_message_event(channel_id: str, access_token: str, event: dict) -> None:
+    """處理單一個非檔案的 message event（文字訊息等）——內容是原本
+    webhook() 裡逐一處理每個事件的邏輯，搬出來是為了能被排進
+    background_tasks、不卡住 webhook 本身的回應（見 webhook() 的
+    說明）。這裡面每一個原本迴圈裡的 `continue`，現在都對應這個
+    函式的 `return`（提早結束這一個事件的處理，語意不變）。"""
+    message = event["message"]
+    reply_token = event["replyToken"]
+    source = event["source"]
+    source_type = source.get("type")  # "user" | "group" | "room"
+    message_type = message.get("type")
+    logger.info(f"[{channel_id}] Event payload: {event}")
+    """
+     在群組/聊天室中，只回應「文字」訊息，且該訊息必須是合理的
+     購車諮詢問題（見 _is_car_related_question）或明確 @提及了
+     機器人——@mention 這條路徑保留作為關鍵字清單漏接時的備援，
+     而不是必要條件。1:1 聊天則兩者都不需要。檔案訊息在 LINE
+     上永遠不可能帶有 @mention，所以這道門檻不適用於它們——
+     群組/聊天室中傳送的任何檔案都會被視為更新請求。
+    """
+    if source_type in ("group", "room") and message_type == "text":
+        mentions = _self_mentions(message)
+        message_text = message.get("text", "")
+        has_text_mention = _has_text_mention(message_text)
+        is_car_related = _is_car_related_question(message_text)
+        logger.info(
+            f"[{channel_id}] Parsed group/room message: mentions={mentions}, "
+            f"text_has_@={has_text_mention}, car_related={is_car_related}"
+        )
+        if not mentions and not has_text_mention and not is_car_related:
+            logger.info(f"[{channel_id}] Ignored unrelated group/room message: {message}")
+            return
+
+    # push 回覆的目標對象：若有群組/聊天室則優先使用，否則使用該使用者。
+    target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
+    if not target_id:
+        # 匿名群組成員（尚未加官方帳號為好友），沒有可用的目標對象——跳過。
+        logger.info(f"[{channel_id}] Skipped: no usable target id in source={source}")
+        return
+
+    # 實際發訊者，在群組/聊天室中與 target_id 不同——
+    # 用來讓每個人各自的 NotebookLM 對話串保持獨立。
+    # 若群組成員尚未加官方帳號為好友，LINE 不會提供這個值；
+    # 這種情況下問題依然會被回答，只是沒有記憶。
+    sender_user_id = source.get("userId")
+    group_id = source.get("groupId")
+    room_id = source.get("roomId")
+
+    if message_type == "text":
+        question = message["text"]
+        if source_type in ("group", "room"):
             mentions = _self_mentions(message)
-            message_text = message.get("text", "")
-            has_text_mention = _has_text_mention(message_text)
-            is_car_related = _is_car_related_question(message_text)
-            logger.info(
-                f"[{channel_id}] Parsed group/room message: mentions={mentions}, "
-                f"text_has_@={has_text_mention}, car_related={is_car_related}"
-            )
-            if not mentions and not has_text_mention and not is_car_related:
-                logger.info(f"[{channel_id}] Ignored unrelated group/room message: {message}")
-                continue
-
-        # push 回覆的目標對象：若有群組/聊天室則優先使用，否則使用該使用者。
-        target_id = source.get("groupId") or source.get("roomId") or source.get("userId")
-        if not target_id:
-            # 匿名群組成員（尚未加官方帳號為好友），沒有可用的目標對象——跳過。
-            logger.info(f"[{channel_id}] Skipped: no usable target id in source={source}")
-            continue
-
-        # 實際發訊者，在群組/聊天室中與 target_id 不同——
-        # 用來讓每個人各自的 NotebookLM 對話串保持獨立。
-        # 若群組成員尚未加官方帳號為好友，LINE 不會提供這個值；
-        # 這種情況下問題依然會被回答，只是沒有記憶。
-        sender_user_id = source.get("userId")
-        group_id = source.get("groupId")
-        room_id = source.get("roomId")
-
-        if message_type == "text":
-            question = message["text"]
-            if source_type in ("group", "room"):
-                mentions = _self_mentions(message)
-                question = (
-                    _strip_mentions(question, mentions) if mentions
-                    else _strip_text_mention_trigger(question)
-                )
-
-            if _is_celebration_message(question):
-                logger.info(f"[{channel_id}] Ignored celebration/deal-closed message: {question[:50]}")
-                continue
-
-            # 每則訊息只解析一次，並貫穿傳遞給下面的每一次回覆，
-            # 讓忙碌的群組聊天能一眼看出每個答案屬於誰的問題。
-            # 在 1:1 聊天或 LINE 未提供發訊者 id 時為 None/None。
-            mention_user_id, mention_display_name = await _resolve_mention(
-                source_type, sender_user_id, group_id, room_id, access_token
+            question = (
+                _strip_mentions(question, mentions) if mentions
+                else _strip_text_mention_trigger(question)
             )
 
-            if source_type in ("group", "room") and not question:
-                # 移除 mention 之後沒有剩下任何問題文字——
-                # 這裡刻意保持通用回覆，不需要指定廠商名稱。
-                await reply_text(
-                    reply_token, access_token, "請問想問什麼問題呢？",
-                    mention_user_id, mention_display_name,
-                )
-                continue
+        if _is_celebration_message(question):
+            logger.info(f"[{channel_id}] Ignored celebration/deal-closed message: {question[:50]}")
+            return
 
-            logger.info(f"[{channel_id}] ({source_type}) Q: {question[:50]}")
+        # 每則訊息只解析一次，並貫穿傳遞給下面的每一次回覆，
+        # 讓忙碌的群組聊天能一眼看出每個答案屬於誰的問題。
+        # 在 1:1 聊天或 LINE 未提供發訊者 id 時為 None/None。
+        mention_user_id, mention_display_name = await _resolve_mention(
+            source_type, sender_user_id, group_id, room_id, access_token
+        )
 
-            if _is_update_kb_request(question):
-                await reply_text(
-                    reply_token, access_token, "請上傳更新後的資料",
-                    mention_user_id, mention_display_name,
-                )
-                continue
+        if source_type in ("group", "room") and not question:
+            # 移除 mention 之後沒有剩下任何問題文字——
+            # 這裡刻意保持通用回覆，不需要指定廠商名稱。
+            await reply_text(
+                reply_token, access_token, "請問想問什麼問題呢？",
+                mention_user_id, mention_display_name,
+            )
+            return
 
-            restricted_topic = classify_restricted_topic(question)
-            if restricted_topic == "authorization_promise":
-                await reply_text(
-                    reply_token, access_token, _RESTRICTED_TOPIC_REPLY,
-                    mention_user_id, mention_display_name,
-                )
-                continue
-            if restricted_topic == "purchase":
-                await _show_working_indicator(source_type, target_id, access_token, "⏳正在查詢中，請稍後")
+        logger.info(f"[{channel_id}] ({source_type}) Q: {question[:50]}")
 
-                await _purchase_intent_ask_and_reply(
-                    channel_id, reply_token, access_token, question,
-                    sender_user_id, group_id, room_id,
-                    mention_user_id, mention_display_name,
-                )
-                continue
+        if _is_update_kb_request(question):
+            await reply_text(
+                reply_token, access_token, "請上傳更新後的資料",
+                mention_user_id, mention_display_name,
+            )
+            return
 
-            # 群組/聊天室在更早（第 341 行附近）就已經先做過車輛相關性
-            # 判斷，沒過關的訊息根本不會執行到這裡；但 1:1 聊天完全
-            # 沒有經過那一關（見上面的說明：1:1 不需要 @mention 也不
-            # 需要車輛相關性判斷就會被處理），導致跟車輛完全無關的
-            # 問題（例如問颱風動態）會被直接轉給 NotebookLM——NotebookLM
-            # 有時候會為了「幫忙」而觸發它自己的網路搜尋功能，回答裡
-            # 夾帶只有網頁版看得懂的 UI 元件描述，在 LINE 上會變成一
-            # 大坨亂碼。1:1 這裡也要做同樣的把關，跟知識庫無關的問題
-            # 一律當閒聊回絕，不要送進 NotebookLM。
-            #
-            # 但如果這個使用者最近才剛跟機器人聊過車（見
-            # `_has_recent_conversation`），代表現在仍在同一輪對話裡
-            # ——追問句常常不會重複任何車輛關鍵字，這種情況下不套用
-            # 嚴格的關鍵字判斷，讓對話能自然延續下去。
-            if (
-                source_type == "user"
-                and not _is_car_related_question(question)
-                and not await _has_recent_conversation(channel_id, sender_user_id)
-            ):
-                await reply_text(
-                    reply_token, access_token, _OFF_TOPIC_REPLY,
-                    mention_user_id, mention_display_name,
-                )
-                continue
-
+        restricted_topic = classify_restricted_topic(question)
+        if restricted_topic == "authorization_promise":
+            await reply_text(
+                reply_token, access_token, _RESTRICTED_TOPIC_REPLY,
+                mention_user_id, mention_display_name,
+            )
+            return
+        if restricted_topic == "purchase":
             await _show_working_indicator(source_type, target_id, access_token, "⏳正在查詢中，請稍後")
 
-            await _ask_and_reply(
+            await _purchase_intent_ask_and_reply(
                 channel_id, reply_token, access_token, question,
                 sender_user_id, group_id, room_id,
                 mention_user_id, mention_display_name,
             )
-            continue
+            return
 
-    return {"status": "ok"}
+        # 群組/聊天室在更早就已經先做過車輛相關性判斷，沒過關的訊息
+        # 根本不會執行到這裡；但 1:1 聊天完全沒有經過那一關（見上面
+        # 的說明：1:1 不需要 @mention 也不需要車輛相關性判斷就會被
+        # 處理），導致跟車輛完全無關的問題（例如問颱風動態）會被直接
+        # 轉給 NotebookLM——NotebookLM 有時候會為了「幫忙」而觸發它
+        # 自己的網路搜尋功能，回答裡夾帶只有網頁版看得懂的 UI 元件
+        # 描述，在 LINE 上會變成一大坨亂碼。1:1 這裡也要做同樣的
+        # 把關，跟知識庫無關的問題一律當閒聊回絕，不要送進 NotebookLM。
+        #
+        # 但如果這個使用者最近才剛跟機器人聊過車（見
+        # `_has_recent_conversation`），代表現在仍在同一輪對話裡
+        # ——追問句常常不會重複任何車輛關鍵字，這種情況下不套用
+        # 嚴格的關鍵字判斷，讓對話能自然延續下去。
+        if (
+            source_type == "user"
+            and not _is_car_related_question(question)
+            and not await _has_recent_conversation(channel_id, sender_user_id)
+        ):
+            await reply_text(
+                reply_token, access_token, _OFF_TOPIC_REPLY,
+                mention_user_id, mention_display_name,
+            )
+            return
+
+        await _show_working_indicator(source_type, target_id, access_token, "⏳正在查詢中，請稍後")
+
+        await _ask_and_reply(
+            channel_id, reply_token, access_token, question,
+            sender_user_id, group_id, room_id,
+            mention_user_id, mention_display_name,
+        )
 
 
 async def _ask_and_reply(

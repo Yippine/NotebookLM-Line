@@ -208,6 +208,15 @@ RESTRICTED_TOPIC_CUSTOM_PROMPT = (
     "而不是按規格項目分組、把同一款車的資訊拆散到不同列裡、跟另一款車交錯呈現。"
     "不能因為廠商數量超過門檻，就簡化成只有「廠商＋台數」、完全"
     "沒有比較到規格差異的表格，那樣答非所問。\n"
+    "同一組規格資料只能用「一種」表格呈現一次，不可以先後用兩種不同表格方向"
+    "（例如先用「比較項目為列、每台車為欄」，緊接著又用「比較項目為列」但欄位"
+    "標籤寫法不同的另一個表格，或是再追加「每台車為列、比較項目為欄」的第三個"
+    "表格）把同一批車輛的規格重複生成兩次、三次——這是真實發生過的案例：同一則"
+    "回答裡，弘益汽車的 6 台白色 TOYOTA 現車被生成了三次幾乎一樣的規格表格，其中"
+    "一次甚至在表格中途斷掉、跟一句敘述文字黏在一起，變成一段不成表格也不成句子"
+    "的亂碼（「| **車門乘客**弘益汽車**在庫的 6 台...現車皆為**汽油**引擎...」）。"
+    "決定好其中一種表格方向之後就只生成那一個表格，把答案講完即可，不要因為想"
+    "「換個方式再確認一次」就重新排列組合同一批資料再生成一次。\n"
     "另外，如果使用者提問時明確使用「比較」「比較一下」「對照」這類字眼，要求把"
     "『同一款車型』在不同廠商的現車放在一起比較（例如「幫我用表格比較一下 3 家以上"
     "廠商的 Altis 現車」），代表使用者要的是逐台現車的詳細規格並排呈現，不是單純"
@@ -229,6 +238,16 @@ RESTRICTED_TOPIC_CUSTOM_PROMPT = (
     "「這個比較裡還沒列出來的其他廠商」，仍然限定在 Altis 與 Corolla Cross 這兩款"
     "車型，不是重新問一個不限車型的現車總覽。只有使用者明確提到新的車型、廠牌或"
     "條件時，才視為換了主題、改用新的範圍作答。\n"
+    "使用者如果緊接著追問某一家廠商的規格明細（例如上一句話的總覽表裡列出"
+    "「弘益汽車」符合條件 6 台，使用者接著問「弘益汽車那幾台分別是什麼規格」），"
+    "一律沿用上一句話設定的篩選條件（顏色、里程、廠牌、車型等）去查這家廠商，"
+    "絕對不可以改成列出這家廠商完全沒篩選過的全部庫存——這是真實發生過的案例："
+    "篩選條件明明是「白色、里程 10 萬以內的 Toyota」，追問弘益汽車的明細時，"
+    "回答卻變成「弘益汽車登錄的現車共有 35 台，以下為清單前四台」，完全忽略了"
+    "篩選條件、答非所問。即使使用者講的台數（例如「那四台」）跟上一句總覽表裡的"
+    "台數（例如 6 台）對不上，也不能因為數字兜不起來就放棄套用篩選條件、改用未篩選"
+    "的全部庫存回答——依然要用上一句的篩選條件去查這家廠商，把符合條件的每一台都"
+    "列出規格明細；使用者講的台數不精確不影響這條規則的適用。\n"
     "會有這條規定，是因為這類跨 4 家以上廠商的完整表格需要逐一比對大量資料，"
     "生成常常要 3-5 分鐘以上，使用者在 LINE 上等待體驗會很差——寧可先給精簡總覽、"
     "之後再追問，也不要一次生成涵蓋所有廠商細節的完整報告。\n"
@@ -258,13 +277,23 @@ RESTRICTED_TOPIC_CUSTOM_PROMPT = (
     "對不上——這些差異使用者自己比對後面列出的規格明細就看得出來，"
     "不需要事先用文字複述一次。點出「沒有完全符合、最接近如下」之後，"
     "直接接續列出該替代車輛的規格明細即可。\n"
-    "任何情境下，只要是在列出單一一台車輛的規格明細（不論是前述沒有完全"
-    "符合條件時的最接近替代車輛，還是其他情境下列出的單一現車），一律"
+    "任何情境下，只要是在列出車輛的規格明細——不論是單一一台（例如前述"
+    "沒有完全符合條件時的最接近替代車輛，或其他情境下列出的單一現車），"
+    "還是同一家廠商底下同時有好幾台都符合條件（例如某廠商有 6 台白色"
+    "TOYOTA 都符合篩選條件，就要逐台各自列出，不是只挑一台代表）——一律"
     "用「欄位名稱：值」的格式、一個欄位一行，例如「車型：X-TRAIL」"
     "「年份：2016」「顏色：灰色」這樣緊密列出，欄位與欄位之間不要留"
     "空行；絕對不要把欄位名稱單獨包成「【欄位名稱】」自成一行、值再"
     "另起一行或空一行接續——「【　】」這種括號標題格式只保留給廠商"
-    "名稱或車輛名稱這種區塊標題使用，不要用在個別規格欄位上。\n"
+    "名稱或車輛名稱這種區塊標題使用，不要用在個別規格欄位上。同一家"
+    "廠商底下有多台車符合條件時，每一台車開頭用「【車型】」這種簡短"
+    "標籤區分（例如「【ALTIS S+版本】」），標籤底下接著列出那一台車"
+    "自己的欄位：值明細，車與車之間只留一個空行分隔就好，不要另外加任何"
+    "分隔線（例如一整排的「-」「－」或其他符號組成的橫線）；絕對不要為了同一家"
+    "廠商底下的這幾台車，另外生成一個表格（不論是「比較項目為列」還是"
+    "「每台車為列」的方向都不行）——這種情況不是「比較不同車型」，只是"
+    "單純把符合條件的每一台現車都列出來，跟列單一一台車用的是同一種"
+    "「欄位：值」格式，只是重複列了好幾次、每次換一台車而已。\n"
     "回答如果會依廠商分成好幾則訊息呈現，開頭也不要另外加一句總覽有"
     "哪些廠商、共幾家的開場白（例如「目前有福大汽車、中彰投汽車有限"
     "公司與安心汽車三家車商擁有 Nissan Kicks：」）——這句話雖然本身"
@@ -338,6 +367,20 @@ async def bind_nlm(channel_id: str, storage_state: dict):
     # 這個 channel 任何已快取的 session 都是用舊的認證資訊開啟的——
     # 把它捨棄掉，讓下一次 ask_question 用新的認證資訊重新開啟一個。
     await _invalidate_client(channel_id)
+
+    # 這裡剛剛已經用新的認證資訊實際打過一次 list_notebooks()（見上面
+    # 呼叫 list_notebooks(storage_state)）並且成功了——代表這個 channel
+    # 現在確定是活的。這條路徑除了「使用者第一次綁定」之外，也是
+    # scripts/nlm_cookie_refresh.py 偵測到 channel 被標成 expired 之後，
+    # 拿到新鮮 cookie 自動重新綁定時會呼叫到的同一個函式——如果不在
+    # 這裡把 nlm_health_status 一併改回 healthy，這個欄位會一直卡在
+    # 上一次留下的 expired，直到剛好某次排程健康檢查、或剛好有人問了
+    # 問題才會被動清掉，中間這段空窗期會讓下一次健康檢查（例如每次
+    # 部署重啟後端都會立刻做一次）誤以為又是一次新的失效、重複發送
+    # 告警——這是真實發生過的案例：cookie 明明已經刷新成功，管理員
+    # 卻感覺不管成功失敗都一直收到告警，根本原因就是這個欄位沒有
+    # 跟著真正的健康狀態同步更新。
+    await _set_health_status(channel_id, "healthy")
 
     return notebook_id, notebooks
 
@@ -643,8 +686,8 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
             logger.info(f"[{channel_id}] 命中答案快取，不重新查詢 NotebookLM：{question!r}")
             return cached
 
-    async def _ask(client):
-        result = await client.chat.ask(notebook_id, question, conversation_id=conversation_id)
+    async def _ask(client, conv_id):
+        result = await client.chat.ask(notebook_id, question, conversation_id=conv_id)
         logger.info(
             f"[{channel_id}] user={line_user_id!r} NotebookLM 回傳延續用的 "
             f"conversation_id={result.conversation_id!r}"
@@ -669,14 +712,14 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
     try:
         try:
             client = await _get_cached_client(channel_id, storage_state)
-            answer, new_conversation_id, source_map = await _ask(client)
+            answer, new_conversation_id, source_map = await _ask(client, conversation_id)
         except Exception:
             # 快取的 session 可能已經失效（連線中斷、cookie 過期）——
             # 在把錯誤呈現給使用者之前，先捨棄它並用一個全新開啟的
             # session 重試一次。
             await _invalidate_client(channel_id)
             client = await _get_cached_client(channel_id, storage_state)
-            answer, new_conversation_id, source_map = await _ask(client)
+            answer, new_conversation_id, source_map = await _ask(client, conversation_id)
 
         # NotebookLM 的 references 偶爾會漏給答案文字裡實際用到的某個
         # 引用編號（source_map 缺一個 key，但文字裡仍出現對應的 [n]）。
@@ -688,9 +731,25 @@ async def ask_question(channel_id: str, question: str, line_user_id: str | None 
         # 避免無限重問。
         if citation_numbers_in(answer) - source_map.keys():
             try:
-                answer, new_conversation_id, source_map = await _ask(client)
+                answer, new_conversation_id, source_map = await _ask(client, conversation_id)
             except Exception:
                 pass  # 重問失敗就沿用原本（雖然殘缺）的答案，好過整個問題失敗
+
+        # 真實發生過的案例：同一個使用者的對話串經過長時間、大量輪次
+        # 累積之後，繼續延續這個既有 conversation_id 追問，NotebookLM
+        # 開始每次都回傳完全空白的答案（沒有拋例外，answer 就是空
+        # 字串）——但同一個問題改成開一個全新對話卻能正常回答，代表
+        # 是這個特定對話串本身卡住了，不是問題本身有問題。只有在
+        # 「確實延續了既有對話」時才值得重試：全新對話（conversation_id
+        # 一開始就是 None）本來就沒有更舊的對話可以退回去，重試也解決
+        # 不了什麼。重試成功的話，等於幫這個使用者的對話串換一輪全新
+        # 的 conversation_id，後續追問會接在這個新對話上，不會一直卡
+        # 在壞掉的舊對話裡。
+        if not answer.strip() and conversation_id is not None:
+            try:
+                answer, new_conversation_id, source_map = await _ask(client, None)
+            except Exception:
+                pass  # 重試失敗就沿用原本的空答案，讓後面「沒有取得回覆內容」的備援訊息接手
 
         if line_user_id and new_conversation_id:
             await _save_conversation_id(channel_id, line_user_id, new_conversation_id)

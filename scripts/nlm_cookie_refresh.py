@@ -23,15 +23,26 @@ ask_question / check_all_channels_health）一偵測到認證失敗，就會
 expired，就直接安靜結束，不做任何昂貴或敏感的事（不讀瀏覽器
 cookie、不打 admin API、不發告警）。正因為「沒事做」的那一輪成本
 低到可以忽略，這支腳本可以排得很頻繁（例如每 1-2 分鐘一次），
-讓「偵測到掛了」與「真的刷新」之間的延遲從過去最長半小時，縮短到
-接近這個排程間隔本身，不必再靠拉長單次排程的間隔去「猜」多久會被
-發現。
+讓「偵測到掛了」與「真的開始嘗試修復」之間的延遲從過去最長半小時，
+縮短到接近這個排程間隔本身，不必再靠拉長單次排程的間隔去「猜」
+多久會被發現。
+
+但「偵測」跟「真的動手修復」的節流頻率是分開的：偵測（讀本機
+SQLite）可以很密，修復（讀瀏覽器 cookie、透過 list_notebooks API
+實際打一次 Google）不行——如果某個 channel 持續壞著、沒有自己好，
+放著不管的話每次排程都會重打一次 Google，等於幾十分鐘內連續嘗試
+幾十次，這種頻率本身就可能被 Google 風控判定為可疑的自動化行為，
+反而提高整個 session 被判 TrueExpiry（需要人工重新登入）的機率——
+所以實際嘗試修復的動作另外有自己的冷卻視窗
+（_REFRESH_ATTEMPT_COOLDOWN_SECONDS，目前 5 分鐘），跟排程本身
+多密無關。
 
 只有續期失敗時才會發 LINE 通知給管理員——正常運作時完全靜默，
 不會每次執行都發一則「一切正常」的訊息來洗版。由於現在排程跑得
 頻繁很多，同一個尚未解決的失敗原因會加上 30 分鐘的告警冷卻
 （見 _ALERT_COOLDOWN_SECONDS），避免同一個問題被連續灌成一長串
-重複通知。
+重複通知——這是獨立於上面那道修復動作冷卻的另一層節流，一個管
+「要不要再嘗試」，一個管「要不要再通知」。
 
 讀到的 storage_state.json 內容一旦上傳給後端，本機這份含有
 cookie 的檔案就沒有用處了——會覆寫內容後再刪除（shred，而不是
@@ -62,6 +73,8 @@ docs/ubuntu-cookie-refresh-runbook.md）：
 
 import glob
 import json
+import logging
+import logging.handlers
 import os
 import re
 import sqlite3
@@ -76,18 +89,76 @@ ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT / "backend" / ".env"
 DB_PATH = ROOT / "data" / "data.db"
 ALERT_STATE_PATH = ROOT / "data" / "nlm_cookie_refresh_alert_state.json"
+# 故意跟 ALERT_STATE_PATH 分開放在不同檔案，而不是同一份 JSON 裡的
+# 不同 key——見 _clear_alert_state() 的說明，那個函式會在每次「成功」
+# 之後整個刪掉 ALERT_STATE_PATH，如果修復嘗試的冷卻時間戳記也存在
+# 同一份檔案裡，就會被這個「成功後清冷卻」的邏輯一起清掉，導致下一輪
+# 排程（1 分鐘後）誤以為完全沒有嘗試過、又立刻重打一次 Google——這正是
+# 這道節流原本要防止的事，實際發生過（2026-08-19 這次事故：同一個
+# channel 連續十幾分鐘、每分鐘都在重新綁定，因為每次「成功」都把
+# 自己剛留下的冷卻紀錄清掉了）。分成兩份檔案，兩套生命週期就不會
+# 互相干擾：告警冷卻在「成功」時應該被清掉（下次壞掉要能立刻告警），
+# 修復嘗試冷卻則完全不該被「這次剛好成功」影響——即使成功了，如果
+# 這個 channel 很快又壞掉（flapping），下一次嘗試還是要等滿冷卻時間，
+# 不能因為上一次是成功收尾就把時鐘歸零。
+REFRESH_ATTEMPT_STATE_PATH = ROOT / "data" / "nlm_cookie_refresh_attempt_state.json"
 LOCAL_PORT = 8083
 BROWSER = "firefox"
 SUBPROCESS_TIMEOUT_SECONDS = 60
+
+# 這支腳本現在排得很密（每分鐘一次），就算大多數輪次都只印一行
+# 「沒事」，長期下來還是會不斷累積。用跟後端（見 backend/main.py 的
+# _file_handler）同一種做法——TimedRotatingFileHandler，每天午夜
+# 切一份新檔——只是 backupCount 設得短很多（3 天而不是 30 天）：
+# 這支腳本的輸出本身只是給人手動除錯用的即時紀錄，不像後端的
+# backend.log 那樣是唯一一份不會隨容器重建而消失的正式紀錄來源，
+# 沒有必要留那麼久。這裡是這支腳本每次獨立執行時*各自*建立一個
+# 新的 handler（不是像後端那樣整個行程只設定一次）——標準函式庫的
+# TimedRotatingFileHandler 在建立當下就會用檔案現有的 mtime 推算
+# 下一次該輪替的時間點，所以就算每分鐘都重新啟動一個全新的 Python
+# 行程，輪替判斷依然正確，不會因為行程沒有常駐而失效。
+_log_dir = ROOT / "data" / "logs"
+_log_dir.mkdir(parents=True, exist_ok=True)
+_file_handler = logging.handlers.TimedRotatingFileHandler(
+    _log_dir / "nlm_cookie_refresh.log",
+    when="midnight",
+    backupCount=3,
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+
+_logger = logging.getLogger("nlm_cookie_refresh")
+_logger.setLevel(logging.INFO)
+_logger.addHandler(_file_handler)
+_logger.addHandler(logging.StreamHandler())
+# 避免這個 logger 的訊息又被往上傳給 root logger 印第二次——這支
+# 腳本沒有另外設定 root logger，但養成習慣、不依賴預設行為。
+_logger.propagate = False
 
 # 同一種失敗原因（用下面各個 reason_key 區分），在這個秒數之內只
 # 告警一次。排程現在跑得很頻繁（分鐘級），沒有這道冷卻的話，同一個
 # 尚未解決的問題會被連續灌成一長串重複的 LINE 通知。
 _ALERT_COOLDOWN_SECONDS = 30 * 60
 
+# 「檢查有沒有 channel 被標成 expired」跟「真的去對 Google 重新整理／
+# 重新綁定」是兩件成本天差地遠的事：前者只是讀本機 SQLite，可以排得
+# 很密（每分鐘）；後者要讀瀏覽器 cookie、再透過 NotebookLM 的
+# list_notebooks API 實際打一次 Google，這是會被 Google 風控系統看在
+# 眼裡的真實流量。這兩件事目前綁在同一次 main() 執行裡——如果只靠
+# `any_channel_expired()` 那道閘門，一旦某個 channel 卡在 expired
+# 沒有自己好，接下來每一分鐘都會重新對 Google 打一次，等於在幾十分鐘
+# 內連續嘗試幾十次，明顯比正常使用模式異常，反而提高被判定為可疑
+# 自動化行為、把整個 session 判失效（TrueExpiry，需要人工重新登入）
+# 的風險——這跟這支腳本原本要降低 TrueExpiry 頻率的目的完全相反。
+# 所以這裡另外設一道獨立的冷卻，只節流「真的去嘗試修復」這個動作本身
+# （不影響上面那道便宜的每分鐘檢查閘門，也不跟告警冷卻共用邏輯，
+# 因為告警冷卻只是防止洗版通知，跟要不要嘗試修復是兩件事）。
+_REFRESH_ATTEMPT_COOLDOWN_SECONDS = 5 * 60
+_REFRESH_ATTEMPT_STATE_KEY = "_last_refresh_attempt"
+
 
 def log(msg: str) -> None:
-    print(f"[nlm-cookie-refresh] {msg}", flush=True)
+    _logger.info(msg)
 
 
 def _read_env_var(name: str) -> str:
@@ -154,6 +225,41 @@ def send_admin_alert_with_cooldown(reason_key: str, message: str) -> None:
     state[reason_key] = now
     _save_alert_state(state)
     send_admin_alert(message)
+
+
+def _load_refresh_attempt_state() -> dict:
+    if not REFRESH_ATTEMPT_STATE_PATH.exists():
+        return {}
+    try:
+        return json.loads(REFRESH_ATTEMPT_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_refresh_attempt_state(state: dict) -> None:
+    REFRESH_ATTEMPT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REFRESH_ATTEMPT_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _refresh_attempt_allowed() -> bool:
+    """回傳現在是否可以真的對 Google 發動一次刷新／重新綁定嘗試——
+    刻意讀寫獨立的 REFRESH_ATTEMPT_STATE_PATH，不跟 send_admin_alert_
+    with_cooldown 共用 ALERT_STATE_PATH：那份檔案會在每次成功之後被
+    _clear_alert_state() 整個刪掉，如果這裡的時間戳記也存在同一份
+    檔案裡，剛記下的冷卻時間會被自己這輪的成功給清掉，下一輪排程
+    就會誤以為完全沒嘗試過。"""
+    state = _load_refresh_attempt_state()
+    last_attempt = state.get(_REFRESH_ATTEMPT_STATE_KEY, 0)
+    return time.time() - last_attempt >= _REFRESH_ATTEMPT_COOLDOWN_SECONDS
+
+
+def _record_refresh_attempt() -> None:
+    """在真的動手嘗試修復*之前*就先記下時間戳記，而不是等結果出爐——
+    這樣即使這次嘗試本身失敗了，下一次嘗試依然要等滿一個冷卻週期，
+    不會因為「失敗了所以不算數」又立刻重打一次。"""
+    state = _load_refresh_attempt_state()
+    state[_REFRESH_ATTEMPT_STATE_KEY] = time.time()
+    _save_refresh_attempt_state(state)
 
 
 def _clear_alert_state() -> None:
@@ -312,7 +418,25 @@ def main() -> None:
         log("no channel currently marked expired, skip refresh")
         return
 
+    # 有 channel 卡在 expired，但如果最近才剛嘗試過（在
+    # _REFRESH_ATTEMPT_COOLDOWN_SECONDS 之內），先不要再打一次 Google——
+    # 排程本身每分鐘都會跑到這裡，若不做這道節流，channel 只要持續壞著
+    # 沒自己好，就會演變成每分鐘對 Google 連續嘗試一次，這種頻率明顯
+    # 不像正常使用模式，反而會提高被 Google 風控判定為可疑自動化行為、
+    # 整個 session 被判 TrueExpiry（需要人工重新登入）的機率——這正好
+    # 跟這支腳本原本要降低 TrueExpiry 頻率的目的相反。detection（上面
+    # 那道閘門）維持每分鐘、cheap；remediation（接下來這些動作）才是
+    # 真正要節流的對象。
+    if not _refresh_attempt_allowed():
+        log(
+            "an expired channel exists, but a refresh attempt was already made "
+            f"within the last {_REFRESH_ATTEMPT_COOLDOWN_SECONDS}s — skip this round "
+            "to avoid hammering Google"
+        )
+        return
+
     log("detected an expired channel, refreshing cookies now")
+    _record_refresh_attempt()
 
     if not refresh_cookies():
         send_admin_alert_with_cooldown(
@@ -368,4 +492,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        # 現在改由 nlm_cookie_refresh_silent.bat 隱藏視窗執行，不再
+        # 靠 shell 的 >> 把 stderr 導向檔案——沒有這個 except，未預期
+        # 的例外會直接消失在一個沒人看得到的隱藏視窗裡，完全無跡可循。
+        _logger.exception("unexpected error")
+        sys.exit(1)
