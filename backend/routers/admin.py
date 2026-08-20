@@ -499,6 +499,48 @@ async def update_invite_student_name(
     return {"status": "ok", "student_name": student_name}
 
 
+@router.delete("/admin/invite-codes/{code}")
+async def delete_unused_invite_code(
+    code: str,
+    _principal: AdminPrincipal = Depends(require_admin_session),
+) -> dict[str, str]:
+    """Delete an invite code only while it is still unused.
+
+    Used invite codes represent a learner's binding and must continue to be
+    removed through the existing Channel deletion flow instead.
+    """
+
+    async with aiosqlite.connect(get_db_path()) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT used FROM invite_codes WHERE code=?",
+            (code,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            await db.rollback()
+            raise HTTPException(404, "邀請碼不存在")
+        if row[0]:
+            await db.rollback()
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "invite_code_in_use",
+                    "message": "已使用的邀請碼不可刪除",
+                },
+            )
+
+        deleted = await db.execute(
+            "DELETE FROM invite_codes WHERE code=? AND used=0",
+            (code,),
+        )
+        if deleted.rowcount != 1:
+            await db.rollback()
+            raise HTTPException(409, "邀請碼狀態已變更，請重新整理")
+        await db.commit()
+    return {"status": "deleted", "code": code}
+
+
 @router.put("/admin/channels/expiry-batch")
 async def set_selected_channels_expiry(
     body: BatchExpiresAtRequest,

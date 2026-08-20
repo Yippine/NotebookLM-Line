@@ -182,6 +182,43 @@ async def test_previous_batch_expiry_does_not_block_an_unused_invite(
 
 
 @pytest.mark.anyio
+async def test_admin_can_delete_only_unused_invite_codes(backend_db, asgi_app, monkeypatch):
+    del backend_db
+    transport = httpx.ASGITransport(app=asgi_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        admin_token = await _login(client, monkeypatch)
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        generated = await client.post(
+            "/api/invite-codes/generate?count=2", headers=headers
+        )
+        assert generated.status_code == 200
+        unused_code, used_code = generated.json()["codes"]
+
+        deleted = await client.delete(
+            f"/api/admin/invite-codes/{unused_code}", headers=headers
+        )
+        assert deleted.status_code == 200
+        assert deleted.json() == {"status": "deleted", "code": unused_code}
+
+        missing = await client.delete(
+            f"/api/admin/invite-codes/{unused_code}", headers=headers
+        )
+        assert missing.status_code == 404
+
+        verified = await client.post(
+            "/api/verify-invite", json={"code": used_code}
+        )
+        assert verified.status_code == 200
+        in_use = await client.delete(
+            f"/api/admin/invite-codes/{used_code}", headers=headers
+        )
+        assert in_use.status_code == 409
+        assert in_use.json()["detail"]["code"] == "invite_code_in_use"
+
+
+@pytest.mark.anyio
 async def test_expiry_cleanup_deletes_only_expired_learner_bindings(backend_db):
     from main import cleanup_expired
 

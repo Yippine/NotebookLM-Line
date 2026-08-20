@@ -4,6 +4,7 @@ import {
   adminLogin,
   adminLogout,
   createChannel,
+  deleteInviteCode,
   exportStudentsCsv,
   setExpiry,
   setSelectedStudentsExpiry,
@@ -142,6 +143,18 @@ describe("protected API client", () => {
     expect(url).toBe("/api/admin/invite-codes/manual-code/name");
     expect(init.method).toBe("PUT");
     expect(JSON.parse(String(init.body))).toEqual({ student_name: "王小明" });
+  });
+
+  it("deletes an unused invite code with the admin Bearer token", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ status: "deleted", code: "manual-code" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteInviteCode("admin-session", "manual-code");
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/admin/invite-codes/manual-code");
+    expect(init.method).toBe("DELETE");
+    expect(new Headers(init.headers).get("Authorization")).toBe("Bearer admin-session");
   });
 
   it("does not echo an unreviewed server error containing secrets", async () => {

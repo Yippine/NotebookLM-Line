@@ -84,6 +84,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   session_expired: "工作階段已過期，請重新登入。",
   invalid_session: "工作階段無效，請重新登入。",
   invalid_credentials: "登入資料不正確。",
+  invite_code_in_use: "已使用的邀請碼不可刪除，請從學員綁定狀況刪除。",
 };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -287,6 +288,17 @@ export async function updateStudentName(
     method: "PUT",
     headers: bearer(adminToken, true),
     body: JSON.stringify({ student_name: studentName }),
+  });
+  return handleResponse(res);
+}
+
+export async function deleteInviteCode(
+  adminToken: string,
+  inviteCode: string,
+): Promise<void> {
+  const res = await fetch(`${BASE}/admin/invite-codes/${encodeURIComponent(inviteCode)}`, {
+    method: "DELETE",
+    headers: bearer(adminToken),
   });
   return handleResponse(res);
 }

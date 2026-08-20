@@ -9,6 +9,7 @@ import {
   configureCourseAccount,
   CourseAccountHealth,
   deleteChannel,
+  deleteInviteCode,
   exportStudentsCsv,
   formatApiError,
   generateInviteCodes,
@@ -24,6 +25,53 @@ import {
 } from "../lib/api";
 
 type Tab = "students" | "codes" | "account";
+
+const PAGE_SIZE = 10;
+
+type PaginationProps = {
+  page: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+  ariaLabel: string;
+};
+
+function Pagination({ page, totalPages, onPageChange, ariaLabel }: PaginationProps) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between gap-3 mt-4 text-sm text-warm-600">
+      <span>每頁 {PAGE_SIZE} 筆，共 {totalPages} 頁</span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page <= 1}
+          className="px-3 py-1.5 rounded-lg border border-warm-200 hover:bg-surface-inset disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          上一頁
+        </button>
+        <select
+          aria-label={ariaLabel}
+          value={page}
+          onChange={(event) => onPageChange(Number(event.target.value))}
+          className="rounded-lg border border-warm-200 bg-surface-raised px-2 py-1.5 text-sm text-warm-700"
+        >
+          {Array.from({ length: totalPages }, (_, index) => {
+            const pageNumber = index + 1;
+            return <option key={pageNumber} value={pageNumber}>第 {pageNumber} 頁</option>;
+          })}
+        </select>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= totalPages}
+          className="px-3 py-1.5 rounded-lg border border-warm-200 hover:bg-surface-inset disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          下一頁
+        </button>
+      </div>
+    </div>
+  );
+}
 
 const EMPTY_ACCOUNT: AdminCourseAccount = {
   email: null,
@@ -119,6 +167,10 @@ export default function AdminPage() {
   const [editingStudentCode, setEditingStudentCode] = useState<string | null>(null);
   const [editingStudentName, setEditingStudentName] = useState("");
   const [studentNameSaving, setStudentNameSaving] = useState(false);
+  const [deletingInviteCode, setDeletingInviteCode] = useState<string | null>(null);
+  const [copiedInviteCode, setCopiedInviteCode] = useState<string | null>(null);
+  const [activePage, setActivePage] = useState(1);
+  const [unusedPage, setUnusedPage] = useState(1);
 
   const logout = (message = "") => {
     sessionStorage.removeItem("admin_token");
@@ -138,6 +190,10 @@ export default function AdminPage() {
     setSelectedChannelIds([]);
     setEditingStudentCode(null);
     setEditingStudentName("");
+    setDeletingInviteCode(null);
+    setCopiedInviteCode(null);
+    setActivePage(1);
+    setUnusedPage(1);
     setNotice("");
     setError(message);
   };
@@ -258,6 +314,39 @@ export default function AdminPage() {
       await refresh();
     } catch (cause) {
       handleProtectedError(cause, "刪除 Channel 失敗。");
+    }
+  };
+
+  const handleDeleteInviteCode = async (student: Student) => {
+    if (deletingInviteCode) return;
+    const displayName = student.student_name ? `「${student.student_name}」` : "這組邀請碼";
+    if (!confirm(`確定要刪除${displayName}（${student.code}）？此操作無法復原。`)) return;
+    setError("");
+    setNotice("");
+    setDeletingInviteCode(student.code);
+    try {
+      await deleteInviteCode(adminToken, student.code);
+      setNewCodes((codes) => codes.filter((code) => code !== student.code));
+      setNotice("未使用的邀請碼已刪除。");
+      await refresh();
+    } catch (cause) {
+      handleProtectedError(cause, "刪除邀請碼失敗，請重新整理後再試。");
+    } finally {
+      setDeletingInviteCode(null);
+    }
+  };
+
+  const handleCopyInviteCode = async (code: string) => {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedInviteCode(code);
+      setNotice("邀請碼已複製到剪貼簿。");
+      window.setTimeout(() => {
+        setCopiedInviteCode((current) => current === code ? null : current);
+      }, 1500);
+    } catch {
+      setError("瀏覽器不允許直接複製，請手動選取邀請碼。");
     }
   };
 
@@ -463,6 +552,23 @@ export default function AdminPage() {
     );
   };
 
+  const active = students.filter((student) => student.used);
+  const unused = students.filter((student) => !student.used);
+  const activePageCount = Math.max(1, Math.ceil(active.length / PAGE_SIZE));
+  const unusedPageCount = Math.max(1, Math.ceil(unused.length / PAGE_SIZE));
+  const visibleActive = active.slice((activePage - 1) * PAGE_SIZE, activePage * PAGE_SIZE);
+  const visibleUnused = unused.slice((unusedPage - 1) * PAGE_SIZE, unusedPage * PAGE_SIZE);
+  const activeChannelIds = active.flatMap((student) => student.channel_id ? [student.channel_id] : []);
+  const allChannelsSelected = activeChannelIds.length > 0
+    && activeChannelIds.every((channelId) => selectedChannelIds.includes(channelId));
+  const someChannelsSelected = selectedChannelIds.length > 0 && !allChannelsSelected;
+  const health = HEALTH_CONTENT[account.health_status];
+
+  useEffect(() => {
+    setActivePage((current) => Math.min(current, activePageCount));
+    setUnusedPage((current) => Math.min(current, unusedPageCount));
+  }, [activePageCount, unusedPageCount]);
+
   if (!adminToken) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
@@ -483,14 +589,6 @@ export default function AdminPage() {
       </div>
     );
   }
-
-  const active = students.filter((student) => student.used);
-  const unused = students.filter((student) => !student.used);
-  const activeChannelIds = active.flatMap((student) => student.channel_id ? [student.channel_id] : []);
-  const allChannelsSelected = activeChannelIds.length > 0
-    && activeChannelIds.every((channelId) => selectedChannelIds.includes(channelId));
-  const someChannelsSelected = selectedChannelIds.length > 0 && !allChannelsSelected;
-  const health = HEALTH_CONTENT[account.health_status];
 
   return (
     <div className="min-h-screen p-6">
@@ -550,9 +648,9 @@ export default function AdminPage() {
               {active.length === 0 ? (
                 <p className="text-warm-400 text-sm text-center py-8">尚無學員完成綁定</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead><tr className="border-b-2 border-warm-200 text-left">
+                <div className="overflow-auto max-h-[32rem] rounded-lg border border-warm-200/70">
+                  <table className="w-full min-w-[760px] text-sm">
+                    <thead><tr className="sticky top-0 z-10 border-b-2 border-warm-200 bg-surface-raised text-left">
                       <th className="pb-3 pr-3 w-10"><input type="checkbox" aria-label="全選學員" checked={allChannelsSelected} ref={(element) => { if (element) element.indeterminate = someChannelsSelected; }} onChange={toggleAllChannels} className="h-4 w-4 accent-copper" /></th>
                       <th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">姓名</th>
                       <th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">邀請碼</th>
@@ -561,7 +659,7 @@ export default function AdminPage() {
                       <th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">到期時間</th>
                       <th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">操作</th>
                     </tr></thead>
-                    <tbody>{active.map((student) => {
+                    <tbody>{visibleActive.map((student) => {
                       const bindingLabel = studentBindingLabel(student);
                       return (
                         <tr key={student.code} className="border-b border-warm-200/60 hover:bg-surface-inset/50">
@@ -578,6 +676,7 @@ export default function AdminPage() {
                   </table>
                 </div>
               )}
+              <Pagination page={activePage} totalPages={activePageCount} onPageChange={setActivePage} ariaLabel="學員清單頁碼" />
             </div>
           </div>
         )}
@@ -618,11 +717,12 @@ export default function AdminPage() {
             <div className="card-raised">
               <h2 className="font-display text-lg font-bold text-warm-800 mb-4">未使用的邀請碼 <span className="ml-2 badge bg-warm-200 text-warm-600 border border-warm-300">{unused.length}</span></h2>
               {unused.length === 0 ? <p className="text-warm-400 text-sm text-center py-4">沒有未使用的邀請碼</p> : (
-                <div className="overflow-x-auto"><table className="w-full text-sm">
-                  <thead><tr className="border-b-2 border-warm-200 text-left"><th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">姓名</th><th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">邀請碼</th></tr></thead>
-                  <tbody>{unused.map((student) => <tr key={student.code} className="border-b border-warm-200/60 hover:bg-surface-inset/50"><td className="py-2">{renderStudentName(student)}</td><td className="py-2 font-mono text-warm-600 text-xs">{student.code}</td></tr>)}</tbody>
+                <div className="overflow-auto max-h-[24rem] rounded-lg border border-warm-200/70"><table className="w-full min-w-[560px] text-sm">
+                  <thead><tr className="sticky top-0 z-10 border-b-2 border-warm-200 bg-surface-raised text-left"><th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">姓名</th><th className="pb-3 font-semibold text-warm-600 text-xs uppercase tracking-wider">邀請碼</th></tr></thead>
+                  <tbody>{visibleUnused.map((student) => <tr key={student.code} className="border-b border-warm-200/60 hover:bg-surface-inset/50"><td className="py-2">{renderStudentName(student)}</td><td className="py-2 font-mono text-warm-600 text-xs"><div className="flex items-center gap-2 flex-wrap"><span>{student.code}</span><button type="button" onClick={() => void handleCopyInviteCode(student.code)} className="font-sans text-xs px-2 py-1 rounded-lg border border-warm-200 text-warm-600 hover:bg-surface-inset">{copiedInviteCode === student.code ? "已複製" : "複製"}</button><button type="button" onClick={() => void handleDeleteInviteCode(student)} disabled={deletingInviteCode === student.code} className="font-sans text-xs px-2 py-1 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50">{deletingInviteCode === student.code ? "刪除中..." : "刪除"}</button></div></td></tr>)}</tbody>
                 </table></div>
               )}
+              <Pagination page={unusedPage} totalPages={unusedPageCount} onPageChange={setUnusedPage} ariaLabel="邀請碼清單頁碼" />
             </div>
           </div>
         )}
