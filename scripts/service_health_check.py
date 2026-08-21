@@ -1,24 +1,26 @@
-"""定期檢查 Docker 服務與 Tailscale Funnel 是否還活著，死掉才通知管理員。
+"""定期檢查 Docker 服務與對外 Tunnel 是否還活著，死掉才通知管理員。
 
 這支腳本取代的是原本的 tunnel_watchdog.py 在「Windows + cloudflared
-quick tunnel」這套組合裡扮演的角色——但職責完全不同，刻意沒有沿用
-同一個檔名，避免讓人誤以為兩者是同一套邏輯的延伸：
+匿名 quick tunnel」這套組合裡扮演的角色——但職責完全不同，刻意沒有
+沿用同一個檔名，避免讓人誤以為兩者是同一套邏輯的延伸：
 
-    Tailscale Funnel 分配到的網址是固定的（例如
-    ``https://nt.tail0364d1.ts.net``），不會像 cloudflared 的匿名
-    quick tunnel 那樣三不五時就換成一個新的隨機網址。原本
-    tunnel_watchdog.py 大部分的邏輯（偵測網址變化、改寫 .env、
-    重啟後端、把新網址同步給 LINE）都是為了應付「網址會變」這件事
-    才存在的——網址不會變了，這些邏輯也就沒有存在的理由。
+    現在對外曝露服務用的是**具名**的 Cloudflare Tunnel（綁定固定的
+    網域，例如 ``https://line-bot.yourdomain.com``），不是 cloudflared
+    的匿名 quick tunnel——具名 tunnel 的網址是固定的，不會像匿名
+    quick tunnel 那樣三不五時就換成一個新的隨機網址、也不受匿名
+    申請的限流影響。原本 tunnel_watchdog.py 大部分的邏輯（偵測網址
+    變化、改寫 .env、重啟後端、把新網址同步給 LINE）都是為了應付
+    「網址會變」這件事才存在的——網址不會變了，這些邏輯也就沒有
+    存在的理由。
 
-    剩下唯一還需要人盯著的，只有「Docker 服務、Tailscale Funnel
-    有沒有意外掛掉」。掛了也不是這支腳本能自己修好的（Docker
-    Desktop 當掉、Tailscale 服務掛掉，都需要人到主機前手動處理），
-    所以這支腳本**只做通知、不做任何自動修復**，跟 tunnel_watchdog.py
+    剩下唯一還需要人盯著的，只有「Docker 服務、對外 Tunnel 有沒有
+    意外掛掉」。掛了也不是這支腳本能自己修好的（Docker Desktop
+    當掉、cloudflared 服務掛掉，都需要人到主機前手動處理），所以
+    這支腳本**只做通知、不做任何自動修復**，跟 tunnel_watchdog.py
     的定位完全不同。
 
 只在「健康狀態改變」時才發通知（從正常變異常、或從異常恢復正常），
-不會每次執行都重複發送同一則告警——這是刻意的設計：immunity 之前
+不會每次執行都重複發送同一則告警——這是刻意的設計：以前匿名
 quick tunnel 三不五時死掉又活過來、加上 LINE 的每月推播訊息額度是
 有限的，若排成短間隔的排程、又每次都重複告警，很容易把額度用光。
 
@@ -42,7 +44,7 @@ REQUIRED_CONTAINERS = ("nlm-line-backend", "nlm-line-frontend")
 
 _CHECK_LABELS = {
     "docker": "Docker 服務",
-    "funnel": "對外連線（Tailscale Funnel）",
+    "tunnel": "對外連線（Cloudflare Tunnel）",
 }
 
 
@@ -88,12 +90,13 @@ def check_docker() -> str | None:
     return None
 
 
-def check_funnel() -> str | None:
+def check_tunnel() -> str | None:
     """檢查 WEBHOOK_BASE_URL 對外是否還連得上。
 
     刻意檢查的是這個公開網址，而不是本機的 localhost:8083——
-    Funnel 是 Tailscale 服務自己管理的，跟後端容器是否健康是兩件
-    互相獨立的事，只測本機連得上，測不出 Funnel 本身是否掛掉。"""
+    Cloudflare Tunnel 是 cloudflared 服務自己管理的，跟後端容器是否
+    健康是兩件互相獨立的事，只測本機連得上，測不出 tunnel 本身是否
+    掛掉。"""
     base_url = _read_env_var("WEBHOOK_BASE_URL")
     if not base_url:
         return "backend/.env 裡沒有 WEBHOOK_BASE_URL，無法檢查"
@@ -146,7 +149,7 @@ def _save_state(state: dict) -> None:
 
 
 def main() -> None:
-    checks = {"docker": check_docker(), "funnel": check_funnel()}
+    checks = {"docker": check_docker(), "tunnel": check_tunnel()}
     state = _load_state()
 
     for name, error in checks.items():
