@@ -111,3 +111,42 @@ def test_without_known_vendors_falls_back_to_vendors_present_in_source_map():
     messages = build_answer_messages(format_for_line(answer), source_map)
 
     assert "正峰汽車商行的現車比較多" in messages[0]
+
+
+def test_correct_vendor_name_with_extraneous_alias_in_parens_is_stripped():
+    # 重現實際發生過的真實案例：模型對廠商名稱沒把握時，沒有整個寫錯，
+    # 而是用「先寫一個名字，緊接著括號附注另一個名字」的方式含糊帶過
+    # ——「力彰汽車商行(正峰汽車商行) [1]」，引用編號 [1] 驗證後，前面
+    # 的「力彰汽車商行」才是對的，括號裡的「正峰汽車商行」是多餘的。
+    answer = "【力彰汽車商行(正峰汽車商行) [1]】\n廠牌：Toyota"
+    source_map = {1: "力彰汽車商行_20260811.md"}
+
+    messages = build_answer_messages(format_for_line(answer), source_map, _ALL_VENDORS)
+
+    assert "力彰汽車商行" in messages[0]
+    assert "正峰汽車商行" not in messages[0]
+
+
+def test_wrong_vendor_name_with_correct_alias_in_parens_is_not_touched_here():
+    # 對照組：如果括號*前面*的名稱才是錯的（跟引用編號對不上），不屬於
+    # 這個函式要處理的情況——這裡不強行「猜」括號內容才是對的並代換，
+    # 避免誤判；這種案例交給 `_correct_vendor_citation_mismatches` 處理
+    # 前面那個名稱本身的訂正即可。
+    answer = "【正峰汽車商行(力彰汽車商行) [1]】\n廠牌：Toyota"
+    source_map = {1: "力彰汽車商行_20260811.md"}
+
+    messages = build_answer_messages(format_for_line(answer), source_map, _ALL_VENDORS)
+
+    assert "力彰汽車商行" in messages[0]
+
+
+def test_vendor_car_model_parenthetical_is_not_mistaken_for_an_alias():
+    # 對照組：「廠商 (車型)」是合法的標籤寫法（見
+    # `_build_vendor_message` 的說明），車型名稱不會以車商常見的行號／
+    # 型態尾綴結尾，不該被誤判成多餘的廠商別名而被拿掉。
+    answer = "【力彰汽車商行 (Golf GTI) [1]】\n廠牌：Volkswagen"
+    source_map = {1: "力彰汽車商行_20260811.md"}
+
+    messages = build_answer_messages(format_for_line(answer), source_map, _ALL_VENDORS)
+
+    assert "Golf GTI" in messages[0]
