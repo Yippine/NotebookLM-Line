@@ -106,6 +106,20 @@ _CAR_RELATED_KEYWORDS = (
     "Wish", "Premio", "Auris", "Prius", "Innova", "Golf", "Tiguan",
     "Focus", "Ranger", "Kicks", "Livina", "Outlander", "Delica",
     "Tucson", "Elantra", "Sportage", "Sorento", "Kona",
+    # 賓士常見車系代號——使用者常直接打車系代號發問（例如「Glc250」），
+    # 且慣用寫法常是「首字大寫＋其餘小寫」（Glc250）而非全大寫
+    # （GLC250），對不上下面 `_MODEL_CODE_RE` 只認全大寫的規則，
+    # 需要另外收錄在這份不分大小寫的清單裡。
+    "GLC", "GLA", "GLB", "GLE", "GLS", "CLA", "CLS", "SLC", "SLK",
+    # 其他品牌常見車系代號／名稱——同樣是「多字母代碼」，同樣有
+    # 大小寫混打接不上 `_MODEL_CODE_RE` 的問題。這裡只收錄夠長、
+    # 不容易跟一般中英夾雜對話字詞混淆的代號（例如 BMW「X5」、
+    # Audi「A4」、Lexus「RX」這類 1～2 字母＋短數字的代號刻意不收，
+    # 誤觸發風險較高）。
+    "CX",  # Mazda CX-3/CX-5/CX-30/CX-9
+    "CR-V", "CRV", "HR-V", "HRV", "Civic", "Accord", "Odyssey",  # Honda
+    "Alphard", "Vellfire", "Prado", "Sienna", "Hilux",  # Toyota
+    "Qashqai", "Sentra", "Teana", "Altima",  # Nissan
     # 常見車型名稱——中文口語音譯（跟上面品牌的中文音譯是同一種需求：
     # 使用者輸入習慣未必用原文拼寫）。目前只收錄真實發生過使用者
     # 這樣打字、卻沒被辨識出來的案例，一樣無法窮舉。

@@ -72,3 +72,23 @@ def test_lowercase_brand_and_model_from_known_list_still_triggers():
     assert _is_car_related_question("nissan kicks") is True
     assert _is_car_related_question("toyota corolla altis多少錢") is True
     assert _is_car_related_question("有沒有RAV4") is True  # 維持原本大寫也要正確判斷
+
+
+def test_mixed_case_benz_model_code_triggers():
+    """回歸測試：實際發生過的真實案例——使用者打「Glc250」詢問賓士
+    GLC 車系，寫法是「首字大寫＋其餘小寫」，既不在全大寫的
+    `_MODEL_CODE_RE` 規則範圍內，車型代號也沒有出現在字面上的品牌
+    名稱裡，過去會被誤判成離題而收到婉拒回覆。"""
+    assert _is_car_related_question("Glc250") is True
+    assert _is_car_related_question("glc250多少錢") is True
+
+
+def test_other_brand_mixed_case_model_codes_trigger():
+    """跟 Glc250 是同一種問題：其他品牌的多字母車系代號，使用者
+    同樣常打成「首字大寫＋其餘小寫」或全小寫，接不上全大寫的
+    `_MODEL_CODE_RE`，需要另外收錄在關鍵字清單裡才能判定為車輛
+    相關問題。"""
+    assert _is_car_related_question("Cx5好開嗎") is True  # Mazda CX-5
+    assert _is_car_related_question("Cr-v有現車嗎") is True  # Honda CR-V
+    assert _is_car_related_question("Alphard多少錢") is True  # Toyota Alphard
+    assert _is_car_related_question("qashqai續航力如何") is True  # Nissan Qashqai

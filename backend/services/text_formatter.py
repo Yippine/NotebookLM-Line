@@ -547,6 +547,99 @@ def _dedupe_repeated_labeled_blocks(text: str) -> str:
     return "\n\n".join(out)
 
 
+def _dedupe_repeated_labeled_segments_within_block(text: str) -> str:
+    """`_dedupe_repeated_labeled_blocks` 的補強：抓同一個以空行分隔
+    的區塊「內部」重複出現的【子標籤】整段內容。
+
+    `_dedupe_repeated_labeled_blocks` 只比對每個區塊「最開頭那一行」
+    是否是重複的標籤——但真實發生過的案例是「廠牌／車型／年份／
+    顏色」這種依比較項目分組的多廠商比較表（見 `_split_by_vendor`
+    「order 為空」的分支），整套子標籤群組在同一個區塊內被完整
+    重新生成了第二次，子標籤彼此之間只用單一換行、沒有空行分隔
+    ——這種重複永遠不會被檢查到，因為它不是區塊的「第一行」。更
+    棘手的是，第二次生成的列標籤有時會整個跑掉，變成不成廠商
+    名稱的殘缺字串（例如原本是「匯新中古汽車有限公司 (自排)：
+    MITSUBISHI」，第二次只剩「自排：MITSUBISHI」，甚至有列變成
+    「比較項目：MITSUBISHI」這種完全看不出對應哪家廠商的佔位字串）
+    ——`_dedupe_repeated_lines_within_labeled_segment` 逐行比對「整行
+    文字是否逐字相同」，這種殘缺列跟第一次生成的列文字對不上，
+    同樣抓不到。
+
+    這裡在每個區塊內部，依【子標籤】切成一段一段（跟
+    `_dedupe_repeated_lines_within_labeled_segment` 的切法一樣），
+    但只要某個子標籤在同一個區塊裡「再次出現」，就直接捨棄那整段
+    ——不比對底下內容是否逐字相同，因為這種重複生成的列內容本來
+    就可能對不上（本函式存在的理由正是為了處理這種情況）。跟
+    `_dedupe_repeated_labeled_blocks` 一樣，比對前要先去掉引用編號；
+    沒有任何【子標籤】的區塊（或子標籤本身沒有重複），完全不受
+    影響。"""
+    blocks = text.split("\n\n")
+    out_blocks: list[str] = []
+    for block in blocks:
+        lines = block.split("\n")
+        segments: list[list[str]] = [[]]
+        for line in lines:
+            if _LABELED_BLOCK_HEADER_RE.match(line.strip()) and segments[-1]:
+                segments.append([])
+            segments[-1].append(line)
+        seen_labels: set[str] = set()
+        kept_lines: list[str] = []
+        for segment in segments:
+            first_line = segment[0].strip() if segment else ""
+            match = _LABELED_BLOCK_HEADER_RE.match(first_line)
+            if match:
+                label = _CITATION_GROUP_RE.sub("", match.group(1)).strip()
+                if label in seen_labels:
+                    continue
+                seen_labels.add(label)
+            kept_lines.extend(segment)
+        out_blocks.append("\n".join(kept_lines))
+    return "\n\n".join(out_blocks)
+
+
+def _dedupe_repeated_lines_within_labeled_segment(text: str) -> str:
+    """在同一個【子標籤】區段內，拿掉逐字重複出現的「欄位：值」行。
+
+    這是 `_dedupe_repeated_labeled_blocks` 抓不到的另一種重複變體：
+    真實發生過的案例是同一台車的欄位被原封不動地在同一個【標籤】
+    底下又印了一次（甚至第三次），標籤本身沒有變、也不是整段區塊
+    被重新生成（`_dedupe_repeated_labeled_blocks` 只比對區塊最開頭
+    的【標籤】是否逐字相同，抓不到「同一個區塊內部」的欄位重複）。
+
+    去重範圍刻意縮小到「以【子標籤】分隔出的每一小段」，而不是
+    整個區塊——一個區塊有時候會包含好幾台不同車輛各自的【車型】
+    子標題（例如同一家廠商有好幾台車符合條件），不同車輛之間剛好
+    欄位值相同（例如都是「引擎燃料：汽油」）是完全正常的情況，
+    不能被誤判成重複而刪掉；只有在同一個子標題底下逐字重複，才是
+    這裡要處理的生成錯誤。沒有任何【子標籤】的區塊，整段視為單一
+    段落處理。
+
+    只在整行逐字完全相同（含空白、單位）時才視為重複；欄位名稱
+    相同但用字不同（例如「18 萬」跟「18 萬公里」），或欄位名稱本身
+    不同（例如「出廠年份」跟「年份」是不同的說法），都不受影響——
+    這種情況沒辦法安全判斷是不是同一件事的重複描述，寧可保留。"""
+    blocks = text.split("\n\n")
+    out_blocks: list[str] = []
+    for block in blocks:
+        lines = block.split("\n")
+        segments: list[list[str]] = [[]]
+        for line in lines:
+            if _LABELED_BLOCK_HEADER_RE.match(line.strip()) and segments[-1]:
+                segments.append([])
+            segments[-1].append(line)
+        deduped_lines: list[str] = []
+        for segment in segments:
+            seen: set[str] = set()
+            for line in segment:
+                if line.strip() and line in seen:
+                    continue
+                if line.strip():
+                    seen.add(line)
+                deduped_lines.append(line)
+        out_blocks.append("\n".join(deduped_lines))
+    return "\n\n".join(out_blocks)
+
+
 def _collapse_consecutive_row_separators(text: str) -> str:
     """拿掉一整行剛好等於廠商名稱的欄位（見
     `_redundant_vendor_value_line_re`）之後，那一行原本左右兩側的
@@ -658,7 +751,23 @@ def _split_by_vendor(
         last_vendor = vendor
 
     if not order:
-        return [_render_atoms(pending)] if pending else []
+        if not pending:
+            return []
+        # 這個分支是所有原子都無法唯一歸屬到單一廠商的情況（例如
+        # 整份回答本身就是一張跨廠商的比較表，每一列都同時引用好
+        # 幾家廠商）——永遠不會走到下面 `_build_vendor_message` 那條
+        # 路。但同一批比較資料被模型重複生成兩次、甚至換一次表格
+        # 方向重新呈現一次的問題，一樣可能發生在這種內容上（真實
+        # 發生過的案例：同一批廠商的【廠牌】【車型】【年份】【顏色】
+        # 比較表被完整生成兩次，第二次換了個表格方向，列標籤變成
+        # 不成廠商名稱的殘缺字串，例如「自排」「手排」「比較項目」）。
+        # 這裡跟 `_build_vendor_message` 套用同一套保險，而不是只
+        # 保護「能歸屬到單一廠商」的內容。
+        rendered = _render_atoms(pending)
+        rendered = _dedupe_repeated_labeled_blocks(rendered)
+        rendered = _dedupe_repeated_labeled_segments_within_block(rendered)
+        rendered = _dedupe_repeated_lines_within_labeled_segment(rendered)
+        return [rendered]
 
     # 最後一個廠商之後的尾隨內容（後面沒有下一個廠商可以歸入了）
     # 會保留附加在最後一個廠商上，而不是被丟棄。
@@ -714,6 +823,31 @@ def _split_by_vendor(
         # 換行邊界——要用清理過後、真正會送給使用者的文字來判斷區塊
         # 邊界，才不會因為邊界算錯而誤判。
         rendered = _dedupe_repeated_labeled_blocks(rendered)
+        # 同一組【子標籤】（例如「廠牌／車型／年份／顏色」）在同一個
+        # 區塊內被完整重新生成第二次的情況（見該函式說明），是上面
+        # 那道保險抓不到的另一種變體——因為第二次出現的子標籤只是
+        # 區塊內部的一行，不是區塊本身的開頭。
+        rendered = _dedupe_repeated_labeled_segments_within_block(rendered)
+        # 同一台車的欄位在同一個【標籤】底下被重新印了第二次的情況
+        # （見該函式說明），是上面兩道保險都抓不到的另一種變體。
+        rendered = _dedupe_repeated_lines_within_labeled_segment(rendered)
+
+        # 內容自己的第一個區塊如果已經是「【廠商名稱...】」這種以
+        # 廠商名稱開頭的標籤（通常是廠商名稱後面接著更具體的車型，
+        # 例如「中彰投汽車有限公司 (Golf GTI)」），代表這個標籤本身
+        # 已經足夠辨識廠商，不用再疊加外層固定的「【廠商】」標題
+        # ——否則使用者會看到廠商名稱連續出現兩次：先是空泛的
+        # 「【廠商】」，緊接著又是更具體的「【廠商 (車型)】」，是真實
+        # 發生過的重複案例。上面的 `redundant_prefix_re` 只處理標籤
+        # 跟廠商名稱「逐字完全相同」的情況（見該函式說明），這裡
+        # 額外處理「標籤以廠商名稱開頭、後面還帶著其他文字」的情況：
+        # 直接沿用這個更具體的標籤本身當標題，不再另外疊加外層標題。
+        first_line = rendered.split("\n", 1)[0].strip()
+        header_match = _LABELED_BLOCK_HEADER_RE.match(first_line)
+        if header_match:
+            label = _CITATION_GROUP_RE.sub("", header_match.group(1)).strip()
+            if label.lstrip("（(").startswith(vendor):
+                return rendered
 
         return f"【{vendor}】\n\n{rendered}"
 
@@ -798,6 +932,157 @@ def _correct_vendor_citation_mismatches(
             true_vendor = next(iter(cited))
             if true_vendor != mentioned_vendor:
                 return true_vendor + match.group(0)[len(mentioned_vendor):]
+        return match.group(0)
+
+    return pattern.sub(_replace, text)
+
+
+# 「【標籤】」用來區分同一家廠商底下好幾台同款同色的車時（見
+# `nlm_service.RESTRICTED_TOPIC_CUSTOM_PROMPT` 裡「絕對不可以拿售價
+# 當成這個標籤的區分依據」那條規則），模型偶爾仍會不遵守，直接把來源
+# 文件裡的售價欄位當成區分依據夾帶進標籤裡（真實發生過的案例：
+# 「【匯新中古汽車有限公司 (手排/24.8萬)】」）——售價屬於這個機器人
+# 明確拒答的交易資訊，不該透過標籤洩漏出來，即使使用者問的只是單純
+# 規格查詢。這裡比對「數字＋萬」且後面沒有緊接著「公里」/「km」
+# （里程數才會有這個單位，售價不會）的片段，視為售價，從標籤裡拿掉。
+_LABEL_PRICE_TOKEN_RE = re.compile(r"(?:[/／]\s*)?\d+(?:\.\d+)?\s*萬(?!\s*(?:公里|[Kk][Mm]))")
+_EMPTY_PAREN_RE = re.compile(r"[（(]\s*[）)]")
+_LABEL_LINE_RE = re.compile(r"^(\s*)【(.+?)】(\s*)$")
+_MILEAGE_FIELD_RE = re.compile(r"^\s*里程數：\s*(.+?)\s*$")
+
+
+def _find_mileage_after(lines: list[str], start: int) -> str | None:
+    """從 `start` 開始往後找，直到下一個「【標籤】」行或文字結尾為止，
+    回傳這台車自己的「里程數：」欄位值（供 `_strip_price_from_labels`
+    拿掉售價後、標籤跟前面撞名時當備援區分依據用）。這個值本來就會
+    在內文的欄位明細裡完整顯示過一次，借來當標籤區分依據不算多洩漏
+    任何新資訊。"""
+    for line in lines[start:]:
+        if _LABEL_LINE_RE.match(line):
+            return None
+        match = _MILEAGE_FIELD_RE.match(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _strip_price_from_labels(text: str) -> str:
+    """拿掉「【標籤】」括號附注裡混進來的售價（見上方說明）。
+
+    只處理獨立成行、逐字符合「【標籤】」格式的行——這是人設 prompt
+    規定的標籤格式，其餘一般文字段落不受影響，避免誤刪。拿掉售價
+    片段後，如果標籤的括號因此變空，連括號本身也一併移除（例如
+    「(24.8萬)」整個就是售價、沒有其他內容時）。
+
+    真實發生過的案例是同一款同色車有好幾台庫存、只靠售價互相區分
+    （例如手排 24.8 萬跟手排 25.8 萬各一台）——這種情況下，售價其實
+    是「這幾個標籤唯一不同的地方」，直接拿掉會讓好幾台原本不同的
+    標籤變成逐字相同，被後面的 `_dedupe_repeated_labeled_blocks`／
+    `_dedupe_repeated_labeled_segments_within_block` 誤判成同一台車
+    被重複生成兩次，整段刪掉、使用者少看到一台真實存在的庫存車。
+    這裡在拿掉售價後才發現的撞名，用這台車自己的里程數（見
+    `_find_mileage_after`，本來就會在內文出現過，不是新洩漏的資訊）
+    補回去當區分依據，不讓售價是「唯一區分依據」這件事，變成刪車的
+    副作用。"""
+    lines = text.split("\n")
+    seen_labels: set[str] = set()
+    out_lines: list[str] = []
+    for i, line in enumerate(lines):
+        match = _LABEL_LINE_RE.match(line)
+        if not match:
+            out_lines.append(line)
+            continue
+        indent, label, trailing = match.groups()
+        new_label = _LABEL_PRICE_TOKEN_RE.sub("", label)
+        new_label = _EMPTY_PAREN_RE.sub("", new_label).strip()
+        if new_label == label:
+            seen_labels.add(label)
+            out_lines.append(line)
+            continue
+        if new_label in seen_labels:
+            mileage = _find_mileage_after(lines, i + 1)
+            if mileage:
+                new_label = f"{new_label} {mileage}"
+        seen_labels.add(new_label)
+        out_lines.append(f"{indent}【{new_label}】{trailing}")
+    return "\n".join(out_lines)
+
+
+# 業者名稱常見的行號／型態尾綴——用來判斷「名稱(括號內容)」裡的括號
+# 內容，看起來像不像「另一家業者的名稱」，而不是車型（見
+# `_strip_extraneous_vendor_alias_parenthetical` 的說明）。車型名稱
+# 幾乎不會剛好以這些字樣結尾，用這個當判斷依據風險很低。
+_DEALER_NAME_SUFFIXES = (
+    "車業",
+    "商行",
+    "汽車",
+    "車行",
+    "有限公司",
+    "企業社",
+    "中古車",
+    "股份有限公司",
+)
+
+
+def _looks_like_dealer_name(text: str) -> bool:
+    return any(text.endswith(suffix) for suffix in _DEALER_NAME_SUFFIXES)
+
+
+_VENDOR_ALIAS_PAREN_RE_CACHE: dict[frozenset[str], re.Pattern] = {}
+
+
+def _strip_extraneous_vendor_alias_parenthetical(
+    text: str, source_map: dict[int, str], known_vendors: set[str] | None = None
+) -> str:
+    """拿掉「廠商名稱(另一個名字)」這種寫法裡多餘的括號附注。
+
+    跟 `_correct_vendor_citation_mismatches` 抓的是同一種幻覺的另一個
+    變體：模型對廠商名稱沒把握時，除了會整個寫錯之外，有時會用
+    「先寫一個名字，緊接著括號附注另一個名字」的方式含糊帶過（真實
+    發生過的案例：「捷恩車業(祁恩車業) [1]」，其中引用編號 [1] 實際
+    對應的來源檔名就是「捷恩車業」，「祁恩車業」是多餘、甚至可能是
+    憑空想像出來的名字）。`_correct_vendor_citation_mismatches` 只處理
+    「名稱本身整個寫錯」的情況、名稱跟引用編號之間也不允許出現括號，
+    抓不到這種「名稱本身沒寫錯、但後面又多餘地帶了一個括號附注」的
+    變體，需要另外處理。
+
+    只在「括號前面的名稱，經引用編號驗證後就是正確答案」時才動手拿掉
+    括號——如果括號前面的名稱本身就是錯的，交給
+    `_correct_vendor_citation_mismatches` 處理即可，這裡不重複判斷。
+
+    括號內容還要「長得像一個廠商名稱」（以車商常見的行號／型態尾綴
+    結尾，見 `_DEALER_NAME_SUFFIXES`）才會被拿掉——同樣的「名稱
+    (括號內容)」寫法也會合法地用在「廠商 (車型)」這種標籤上（例如
+    「中彰投汽車有限公司 (Golf GTI)」，見 `_build_vendor_message` 的
+    說明），車型名稱不會剛好以這些字樣結尾，這樣可以避免誤刪。"""
+    vendors_by_citation = {n: vendor_from_title(t) for n, t in source_map.items()}
+    if known_vendors is None:
+        known_vendors = set(vendors_by_citation.values())
+    known_vendors_list = sorted(known_vendors - {"未分類"}, key=len, reverse=True)
+    if not known_vendors_list:
+        return text
+
+    cache_key = frozenset(known_vendors_list)
+    pattern = _VENDOR_ALIAS_PAREN_RE_CACHE.get(cache_key)
+    if pattern is None:
+        vendor_alt = "|".join(re.escape(v) for v in known_vendors_list)
+        gap = rf"(?:(?!{vendor_alt}|[。！？\n\[])[\s\S]){{0,20}}"
+        pattern = re.compile(
+            rf"({vendor_alt})\s*[（(]\s*([^（）()\n]{{1,20}}?)\s*[）)]({gap}\[[\d,\s\-]+\])"
+        )
+        _VENDOR_ALIAS_PAREN_RE_CACHE[cache_key] = pattern
+
+    def _replace(match: re.Match) -> str:
+        vendor, alias, tail = match.group(1), match.group(2), match.group(3)
+        if alias == vendor or not _looks_like_dealer_name(alias):
+            return match.group(0)
+        cited = {
+            vendors_by_citation[n]
+            for n in _citation_numbers_in(tail)
+            if n in vendors_by_citation
+        }
+        if cited == {vendor}:
+            return vendor + tail
         return match.group(0)
 
     return pattern.sub(_replace, text)
@@ -999,7 +1284,9 @@ def _split_and_classify(
     if not text.strip():
         return [], 0
 
+    text = _strip_price_from_labels(text)
     text = _correct_vendor_citation_mismatches(text, source_map, known_vendors)
+    text = _strip_extraneous_vendor_alias_parenthetical(text, source_map, known_vendors)
 
     cited_numbers = _citation_numbers_in(text) & source_map.keys()
     citation_vendor = {n: vendor_from_title(source_map[n]) for n in cited_numbers}

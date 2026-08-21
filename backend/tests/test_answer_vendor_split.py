@@ -407,3 +407,214 @@ def test_vehicle_blocks_with_distinct_car_disambiguation_suffix_are_not_deduped(
     assert "【GOLF 藍色版 (第二台)】" in message
     assert "5 萬公里" in message
     assert "8 萬公里" in message
+
+
+def test_vendor_prefixed_car_label_replaces_the_generic_outer_vendor_header():
+    """重現實際發生過的真實案例：模型自己生成的標籤已經是「廠商名稱
+    (車型)」（例如「中彰投汽車有限公司 (Golf GTI)」），這個標籤本身
+    就足以辨識廠商，不該再疊加外層固定的「【廠商】」標題——否則
+    使用者會看到廠商名稱連續出現兩次：先是空泛的「【中彰投汽車
+    有限公司】」，緊接著又是更具體的「【中彰投汽車有限公司 (Golf
+    GTI)】」。"""
+    answer = (
+        "【中彰投汽車有限公司 (Golf GTI)】\n"
+        "廠牌：Volkswagen [1]\n"
+        "車型：Golf GTI\n"
+        "年份：2014 年\n"
+        "顏色：白色"
+    )
+    source_map = {1: "中彰投汽車有限公司_20260810.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.count("中彰投汽車有限公司") == 1
+    assert message.startswith("【中彰投汽車有限公司 (Golf GTI)】")
+
+
+def test_repeated_field_lines_within_the_same_labeled_segment_are_deduped():
+    """重現實際發生過的真實案例：同一台車底下的欄位，在同一個
+    【標籤】內被原封不動地重新印了一次——標籤本身沒變、也不是整段
+    區塊被重新生成（`_dedupe_repeated_labeled_blocks` 只比對區塊
+    最開頭的標籤是否相同，抓不到「同一個區塊內部」的欄位重複）。"""
+    answer = (
+        "【Golf GTI 白色版】\n"
+        "廠牌：Volkswagen [1]\n"
+        "車型：Golf GTI\n"
+        "年份：2014 年\n"
+        "顏色：白色\n"
+        "排氣量：1.8L\n"
+        "車型：Golf GTI\n"
+        "年份：2014 年\n"
+        "顏色：白色\n"
+        "排氣量：1.8L"
+    )
+    source_map = {1: "中彰投汽車有限公司_20260810.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.count("車型：Golf GTI") == 1
+    assert message.count("年份：2014 年") == 1
+    assert message.count("顏色：白色") == 1
+    assert message.count("排氣量：1.8L") == 1
+
+
+def test_same_field_value_in_different_labeled_segments_is_not_deduped():
+    """對照組：兩台不同的車剛好有欄位值相同（例如都是「引擎燃料：
+    汽油」），即使兩台車的區塊之間沒有空行隔開、仍在同一個大區塊裡
+    （例如表格轉置後緊接著輸出下一台車），也不該被誤判成重複而
+    刪掉其中一台車的欄位——去重範圍必須限定在同一個【標籤】底下，
+    不能跨越到下一個【標籤】。"""
+    answer = (
+        "【Golf GTI 白色版】\n"
+        "廠牌：Volkswagen [1]\n"
+        "引擎燃料：汽油\n"
+        "【Golf R 白色版】\n"
+        "廠牌：Volkswagen [1]\n"
+        "引擎燃料：汽油"
+    )
+    source_map = {1: "中彰投汽車有限公司_20260810.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.count("引擎燃料：汽油") == 2
+
+
+def test_repeated_cross_vendor_comparison_table_is_deduped():
+    """重現實際發生過的真實案例：跨多家廠商的比較表（每個【欄位】
+    區塊底下逐廠商列出一行）被模型完整生成了兩次，第二次還換了個
+    表格方向重新呈現，列標籤從完整廠商名稱變成不成廠商名稱的殘缺
+    字串（例如「自排」「手排」）。
+
+    這種內容每一個原子都同時引用兩家以上的廠商，永遠無法被歸屬到
+    單一廠商的分桶，因此 `_split_by_vendor` 完全不會呼叫
+    `_build_vendor_message`、走的是「所有原子都無法唯一歸屬」的
+    後備分支——這裡要確認那個分支一樣套用了去重保險，而不是原封
+    不動把兩次生成的內容都送給使用者。"""
+    answer = (
+        "【廠牌】\n"
+        "力彰車商行：MITSUBISHI [1]\n"
+        "永春中古汽車有限公司：MITSUBISHI [2]\n"
+        "\n"
+        "【車型】\n"
+        "力彰車商行：VERYCA A190 [1]\n"
+        "永春中古汽車有限公司：VERYCA A190 [2]\n"
+        "\n"
+        "【廠牌】\n"
+        "自排：MITSUBISHI [1]\n"
+        "手排：MITSUBISHI [2]\n"
+        "\n"
+        "【車型】\n"
+        "自排：VERYCA A190 貨車 [1]\n"
+        "手排：VERYCA A190 貨車 [2]"
+    )
+    source_map = {1: "力彰車商行_20260101.md", 2: "永春中古汽車有限公司_20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.count("【廠牌】") == 1
+    assert message.count("【車型】") == 1
+    # 保留的是第一次出現的版本，第二次換方向重新生成、標籤殘缺的
+    # 版本不該殘留在結果裡。
+    assert "自排" not in message
+    assert "手排" not in message
+    assert "力彰車商行：MITSUBISHI" in message
+    assert "永春中古汽車有限公司：MITSUBISHI" in message
+
+
+def test_repeated_cross_vendor_comparison_table_without_blank_line_is_deduped():
+    """重現實際發生過的真實案例：跟上一個測試是同一種重複生成，
+    但這次子標籤（【廠牌】【車型】【年份】【顏色】）彼此之間完全
+    沒有空行分隔，只用單一換行——這種情況下第二次重複出現的
+    【廠牌】只是區塊內部的一行，不是空行分隔區塊的開頭，
+    `_dedupe_repeated_labeled_blocks`（只比對每個空行區塊最開頭的
+    標籤）完全看不到它，需要另一道保險
+    （`_dedupe_repeated_labeled_segments_within_block`）才能抓到。"""
+    answer = (
+        "【廠牌】\n"
+        "力彭汽車商行：MITSUBISHI [1]\n"
+        "永春中古汽車有限公司：MITSUBISHI [2]\n"
+        "【車型】\n"
+        "力彭汽車商行：VERYCA A190 [1]\n"
+        "永春中古汽車有限公司：VERYCA A190 [2]\n"
+        "【廠牌】\n"
+        "自排：MITSUBISHI [1]\n"
+        "手排：MITSUBISHI [2]\n"
+        "【車型】\n"
+        "自排：VERYCA A190 貨車 [1]\n"
+        "手排：VERYCA A190 貨車 [2]"
+    )
+    source_map = {1: "力彭汽車商行_20260101.md", 2: "永春中古汽車有限公司_20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.count("【廠牌】") == 1
+    assert message.count("【車型】") == 1
+    assert "自排" not in message
+    assert "手排" not in message
+    assert "力彭汽車商行：MITSUBISHI" in message
+    assert "永春中古汽車有限公司：MITSUBISHI" in message
+
+
+def test_price_in_car_disambiguation_label_is_stripped():
+    """重現實際發生過的真實案例：同一家廠商底下有好幾台同款同色的
+    庫存車，只用變速系統＋售價區分（例如「【匯新中古汽車有限公司
+    (手排/24.8萬)】」）——售價屬於這個機器人明確拒答的交易資訊，
+    不該透過標籤洩漏出來，即使使用者問的只是單純規格查詢。"""
+    answer = (
+        "【匯新中古汽車有限公司 (手排/24.8萬)】\n"
+        "廠牌：MITSUBISHI [1]\n"
+        "變速系統：手排\n"
+        "里程數：10 萬公里\n"
+        "\n"
+        "【匯新中古汽車有限公司 (自排/30.8萬)】\n"
+        "廠牌：MITSUBISHI [1]\n"
+        "變速系統：自排\n"
+        "里程數：10 萬公里\n"
+        "\n"
+        "【匯新中古汽車有限公司 (手排/25.8萬)】\n"
+        "廠牌：MITSUBISHI [1]\n"
+        "變速系統：手排\n"
+        "里程數：9.9 萬公里"
+    )
+    source_map = {1: "匯新中古汽車有限公司_20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert "萬" not in message.split("\n")[0]  # 標題那一行沒有殘留售價
+    assert "24.8萬" not in message
+    assert "30.8萬" not in message
+    assert "25.8萬" not in message
+    # 三台車都要保留——拿掉售價後兩台手排的標籤變成一樣，不能因此
+    # 被去重邏輯誤判成同一台車重複生成、刪掉其中一台真實存在的庫存車。
+    assert message.count("里程數：10 萬公里") == 2
+    assert message.count("里程數：9.9 萬公里") == 1
+
+
+def test_price_without_other_disambiguation_text_collapses_empty_parens():
+    """對照組：標籤括號裡整個就只有售價、沒有其他內容時（例如
+    「【正峰汽車商行 (24.8萬)】」），拿掉售價後應該連空括號本身也
+    一併清掉，不要留下「正峰汽車商行 ()」這種奇怪的殘留。"""
+    answer = (
+        "【正峰汽車商行 (24.8萬)】\n"
+        "廠牌：MITSUBISHI [1]\n"
+        "里程數：10 萬公里"
+    )
+    source_map = {1: "正峰汽車商行_20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    assert "()" not in messages[0]
+    assert "萬" not in messages[0].split("\n")[0]
