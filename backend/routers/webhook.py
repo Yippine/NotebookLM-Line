@@ -627,10 +627,22 @@ async def _ask_and_reply(
     push 而接受的取捨。
 
     當答案依廠商分則後超過 5 則（LINE 一次 reply 呼叫的訊息數上限）
-    時，前 5 則仍用免額度的 reply 送出，其餘的才改用 push——寧可
-    多花一點額度，也不要讓超過第 5 家的廠商資訊直接消失、使用者
-    完全看不到（這是真實發生過的情況：8 家廠商的總覽拆成一家一則
-    之後，只用 reply 的話後面 3 家會被悄悄截掉）。"""
+    時，不會讓第 5 家之後的廠商資訊悄悄消失（這是真實發生過的情況：
+    8 家廠商的總覽拆成一家一則之後，只用 reply 的話後面 3 家會被
+    悄悄截掉）——但也刻意不再靠 push 補送：LINE 官方帳號的 push
+    訊息額度是「每月」總量管制，額度用盡時不管一次呼叫幾家、合併
+    成幾則，一樣會被 429 擋下（這也是真實發生過的情況：某個月額度
+    用完後，push 補送連續兩次都失敗，使用者完全沒收到第 5 家以後
+    的任何資訊）。所以改成前 4 家維持各自一則完整資訊，第 5 家開始
+    的其餘廠商全部摘要成第 5 則提示訊息（只列廠商名稱，不含台數、
+    售價等細節），讓總則數固定在 5 則以內、全部都用不計額度的
+    reply 送出，不管當月 push 額度剩多少都不受影響。
+
+    這個摘要判斷只在「所有超過第 4 則的訊息都是單一廠商的分則
+    結果」（開頭是「【廠商名稱】」，見 `_vendor_name_from_bubble`）
+    時才套用；如果超過的內容不是逐廠商分則（例如很長的單一段落
+    被依長度切成好幾則），沒辦法摘要成一句話帶過，仍退回原本的
+    「前 5 則 reply、其餘合併成一則 push 補送」做法。"""
     target_id = group_id or room_id or sender_user_id
 
     try:
@@ -656,7 +668,25 @@ async def _ask_and_reply(
 
     if not messages:
         messages = ["⚠️ 沒有取得回覆內容，請稍後再試。"]
-    reply_messages, overflow_messages = messages[:5], messages[5:]
+
+    overflow_messages: list[str] = []
+    if len(messages) <= 5:
+        reply_messages = messages
+    else:
+        overflow_vendors = [_vendor_name_from_bubble(m) for m in messages[4:]]
+        if all(overflow_vendors):
+            # 全部都是逐廠商分則的結果，可以安全摘要成一句提示，
+            # 塞進第 5 則、跟前 4 則一起用免額度的 reply 送出——
+            # 見上方 docstring 的說明。
+            reply_messages = messages[:4] + [
+                f"除此之外，還有 {len(overflow_vendors)} 家符合條件的廠商："
+                + "、".join(overflow_vendors)
+                + "，想看哪一家的詳細資訊可以直接跟我說廠商名稱。"
+            ]
+        else:
+            # 超過的內容不是逐廠商分則，沒辦法摘要成一句話——退回
+            # 原本「前 5 則 reply、其餘合併成一則 push 補送」的做法。
+            reply_messages, overflow_messages = messages[:5], ["\n\n".join(messages[5:])]
 
     try:
         await reply_text(reply_token, access_token, reply_messages, mention_user_id, mention_display_name)
@@ -806,6 +836,17 @@ async def _upload_and_reply(
 
 _UPLOAD_SUCCESS_RE = re.compile(r"已(?:新增檔案|覆蓋同名舊檔案並上傳)：(.+)$")
 _MAX_VENDOR_NAMES_SHOWN = 5
+
+# 依廠商分則後的訊息開頭固定是「【廠商名稱】」（見
+# `text_formatter._build_vendor_message`）——用來辨認一則訊息是不是
+# 「一家廠商一則」的分則結果，供 `_ask_and_reply` 判斷超過 5 則時能
+# 不能安全地把第 5 家之後的內容摘要成一句提示，而不是整段原文都附上。
+_VENDOR_BUBBLE_RE = re.compile(r"^【([^】]+?)】")
+
+
+def _vendor_name_from_bubble(message: str) -> str | None:
+    match = _VENDOR_BUBBLE_RE.match(message)
+    return match.group(1) if match else None
 
 
 def _summarize_upload_results(results: list[str]) -> str:
