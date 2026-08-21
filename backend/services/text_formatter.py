@@ -120,6 +120,22 @@ def _convert_markdown_tables(text: str) -> str:
             i += 2
             rows: list[list[str]] = []
             while i < n and "|" in lines[i] and lines[i].strip():
+                # 模型有時會緊接著（中間沒有空行）再輸出「下一張表格」，
+                # 這種情況下目前這一行其實是下一張表格自己的表頭，不是
+                # 這張表格的資料列——如果不擋下來，這行會被當成資料列
+                # 吞掉，緊接在它後面、屬於下一張表格的分隔線（「|---|...」）
+                # 也會一併被吞成另一列資料，兩張表格的欄位就會被誤接在
+                # 一起、彼此的表頭和分隔線洩漏成看起來像資料的亂碼欄位
+                # （真實發生過的案例：緊接著的「廠商名稱／符合條件的
+                # 台數／最低建議售價」總覽表表頭，被吞進前一張規格比較
+                # 表裡，變成一欄内容是這幾個欄位名稱本身、外加一欄
+                # 「:---」的亂碼）。判斷方式跟外層判斷「這是不是一張
+                # 表格的開頭」用同一套邏輯：這一行本身有「|」，且緊接著
+                # 下一行整行都符合分隔線格式，代表這裡是下一張表格的
+                # 開頭，不要吞掉，讓外層迴圈在下一輪重新把它當一張新
+                # 表格處理。
+                if i + 1 < n and _TABLE_SEPARATOR_RE.match(lines[i + 1]):
+                    break
                 rows.append(_split_table_row(lines[i]))
                 i += 1
 
@@ -489,6 +505,48 @@ def _redundant_vendor_value_line_re(vendor: str) -> re.Pattern:
     return pattern
 
 
+_LABELED_BLOCK_HEADER_RE = re.compile(r"^【(.+?)】\s*$")
+
+
+def _dedupe_repeated_labeled_blocks(text: str) -> str:
+    """拿掉同一則廠商訊息裡，重複出現的同一台車規格區塊。
+
+    人設 prompt 規定車輛規格區塊一律用「【車型標籤】」開頭（見
+    `nlm_service.RESTRICTED_TOPIC_CUSTOM_PROMPT` 裡「【　】」括號只
+    保留給廠商或車輛名稱當標題那條規則），且同一家廠商底下真的有
+    兩台同色同型號的車時，模型會自己在標籤加註「(第一台)」「(第二
+    台)」區分（真實發生過的案例：「【GOLF 藍色版 (第一台)】」「【GOLF
+    藍色版 (第二台)】」）——這代表只要兩個區塊的「【標籤】」逐字完全
+    相同，就幾乎可以確定不是兩台真的不同的車，而是同一台車被整段
+    重新生成了第二次，即使後面欄位的用字、單位不完全一樣（真實發生
+    過的案例：同一台車先寫「排氣量：999」，緊接著又寫「排氣量：
+    999cc」，其餘缺漏欄位一次寫「未記載」、一次寫「無特別記載」）。
+
+    這是即使已經在人設 prompt 裡明確要求「同一台車只能列一次」，
+    模型仍然會偶爾不遵守的案例——prompt 只能降低機率、不能保證
+    完全不發生，這裡在程式碼側做最後一道保險：同一則廠商訊息裡，
+    同一個「【標籤】」只保留第一次出現的區塊，後面重複的整段直接
+    捨棄。標籤比對時要先去掉可能還沒被 `_strip_citations` 清掉的
+    引用編號（呼叫這個函式時那一步還沒做）——兩次重複生成引用到
+    的來源編號不一定相同，只比對去除引用編號後的文字。
+
+    只在區塊「以【標籤】開頭」時才判斷去重，其餘一般文字段落
+    （沒有這種標題）完全不受影響，避免誤刪內容剛好相似的段落。"""
+    blocks = text.split("\n\n")
+    seen_labels: set[str] = set()
+    out: list[str] = []
+    for block in blocks:
+        first_line = block.split("\n", 1)[0].strip()
+        match = _LABELED_BLOCK_HEADER_RE.match(first_line)
+        if match:
+            label = _CITATION_GROUP_RE.sub("", match.group(1)).strip()
+            if label in seen_labels:
+                continue
+            seen_labels.add(label)
+        out.append(block)
+    return "\n\n".join(out)
+
+
 def _collapse_consecutive_row_separators(text: str) -> str:
     """拿掉一整行剛好等於廠商名稱的欄位（見
     `_redundant_vendor_value_line_re`）之後，那一行原本左右兩側的
@@ -649,6 +707,13 @@ def _split_by_vendor(
         # 「這一行」跟前後內容的，這一行整個被拿掉之後，兩條分隔線會
         # 直接相鄰（或變成開頭／結尾），見該函式的說明。
         rendered = _collapse_consecutive_row_separators(rendered)
+
+        # 最後保險：拿掉這則廠商訊息裡重複生成的同一台車規格區塊
+        # （見該函式說明）。放在最後一步，而不是 `_render_atoms` 剛
+        # 產生時就做，是因為前面幾步可能會拿掉整行內容、改變區塊的
+        # 換行邊界——要用清理過後、真正會送給使用者的文字來判斷區塊
+        # 邊界，才不會因為邊界算錯而誤判。
+        rendered = _dedupe_repeated_labeled_blocks(rendered)
 
         return f"【{vendor}】\n\n{rendered}"
 

@@ -235,3 +235,101 @@ def test_stale_conversation_does_not_bypass_the_off_topic_gate(tmp_path, monkeyp
 
     assert asked == []
     assert replied == [webhook._OFF_TOPIC_REPLY]
+
+
+def _insert_attempt(db_path: str, channel_id: str, line_user_id: str, minutes_ago: float) -> None:
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO user_conversations (channel_id, line_user_id, conversation_id, updated_at) "
+        "VALUES (?, ?, NULL, datetime('now', ?))",
+        (channel_id, line_user_id, f"-{minutes_ago} minutes"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_ambiguous_follow_up_reaches_notebooklm_after_a_prior_off_topic_miss(tmp_path, monkeypatch):
+    """重現實際發生過的真實案例：使用者連續打了好幾句話想把問題講
+    清楚（例如「阿迪斯」→「尋」→「A90」→「A190」，前後不到一分鐘），
+    但第一句字面上就沒有踩中任何關鍵字被打槍，導致連 conversation_id
+    都還沒建立。如果沒有 `_touch_recent_attempt` 留下的寬限，接下來
+    每一句字面上一樣模糊的追問都要重新從頭通過同一道嚴格關鍵字
+    檢查，等於連環誤判到底——第一句被拒絕之後，緊接著（在
+    `_RECENT_ATTEMPT_WINDOW` 內）的第二句，即使一樣沒有任何車輛
+    關鍵字，也該被放行送進 NotebookLM。"""
+    channel_id, secret, _ = _setup(tmp_path, monkeypatch)
+    asked = []
+    replied = []
+
+    async def fake_ask_question(cid, question, line_user_id=None):
+        asked.append(question)
+        return ["【SUM】\n\n答案內容"]
+
+    async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
+        replied.append(text)
+
+    async def fake_show_loading(target_id, access_token, seconds=30):
+        return True
+
+    monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
+    monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
+    monkeypatch.setattr(webhook, "show_loading", fake_show_loading)
+
+    _run_webhook(channel_id, secret, "尋")
+    assert asked == []
+    assert replied == [webhook._OFF_TOPIC_REPLY]
+
+    _run_webhook(channel_id, secret, "還有其他的嗎")
+    assert asked == ["還有其他的嗎"]
+
+
+def test_stale_attempt_does_not_bypass_the_off_topic_gate(tmp_path, monkeypatch):
+    """「剛嘗試過」的寬限視窗（`_RECENT_ATTEMPT_WINDOW`，2 分鐘）刻意
+    比「已經成功問過」的視窗（`_RECENT_CONVERSATION_WINDOW`，10 分鐘）
+    短很多——超過這個視窗的舊嘗試紀錄不該繼續放行，否則使用者很久
+    以前隨口打的一句模糊訊息，會讓好幾分鐘後完全無關的閒聊也被誤判
+    成延續中。"""
+    channel_id, secret, _ = _setup(tmp_path, monkeypatch)
+    db_path = database.DB
+    _insert_attempt(db_path, channel_id, "user-1", minutes_ago=5)
+
+    asked = []
+    replied = []
+
+    async def fake_ask_question(cid, question, line_user_id=None):
+        asked.append(question)
+        return ["不應該被呼叫到"]
+
+    async def fake_reply_text(reply_token, access_token, text, mention_user_id=None, mention_display_name=None):
+        replied.append(text)
+
+    async def fake_show_loading(target_id, access_token, seconds=30):
+        return True
+
+    monkeypatch.setattr(webhook, "ask_question", fake_ask_question)
+    monkeypatch.setattr(webhook, "reply_text", fake_reply_text)
+    monkeypatch.setattr(webhook, "show_loading", fake_show_loading)
+
+    _run_webhook(channel_id, secret, "還有其他的嗎")
+
+    assert asked == []
+    assert replied == [webhook._OFF_TOPIC_REPLY]
+
+
+def test_touch_recent_attempt_does_not_clobber_existing_conversation_id(tmp_path, monkeypatch):
+    """`_touch_recent_attempt` 只更新 `updated_at`，不該把已經存在的
+    `conversation_id` 覆寫成 NULL——那個值還要留給 NotebookLM 用來
+    延續對話上下文（見 `nlm_service._save_conversation_id`）。"""
+    channel_id, secret, _ = _setup(tmp_path, monkeypatch)
+    db_path = database.DB
+    _insert_conversation(db_path, channel_id, "user-1", minutes_ago=0)
+
+    asyncio.run(webhook._touch_recent_attempt(channel_id, "user-1"))
+
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT conversation_id FROM user_conversations WHERE channel_id=? AND line_user_id=?",
+        (channel_id, "user-1"),
+    ).fetchone()
+    conn.close()
+    assert row[0] == "conv-1"

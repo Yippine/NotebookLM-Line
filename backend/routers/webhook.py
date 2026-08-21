@@ -106,12 +106,25 @@ _CAR_RELATED_KEYWORDS = (
     "Wish", "Premio", "Auris", "Prius", "Innova", "Golf", "Tiguan",
     "Focus", "Ranger", "Kicks", "Livina", "Outlander", "Delica",
     "Tucson", "Elantra", "Sportage", "Sorento", "Kona",
+    # 常見車型名稱——中文口語音譯（跟上面品牌的中文音譯是同一種需求：
+    # 使用者輸入習慣未必用原文拼寫）。目前只收錄真實發生過使用者
+    # 這樣打字、卻沒被辨識出來的案例，一樣無法窮舉。
+    "阿迪斯",  # Corolla Altis
 )
 
 # 車型代號常見用全大寫英文表示（CRV、SUV、RAV4、EV6、ABS、GTI...），
 # 使用者只打代號、不帶廠牌或任何通用字詞發問是很常見的情況——這條
 # 規則跟上面的關鍵字清單互補，不要求窮舉每一個車型名稱。
-_MODEL_CODE_RE = re.compile(r"(?<![A-Za-z])[A-Z]{2,}[A-Z0-9]*(?![a-z])")
+#
+# 車型代號也常見「單一大寫字母＋數字」的寫法（例如知識庫裡「VERYCA
+# A190」這款車，使用者會直接省略廠牌只打「A190」發問），原本只認
+# 「兩個以上大寫字母開頭」的寫法會漏接這種——真實發生過的案例：
+# 使用者連續問「A90」「A190」都被判定成跟車輛無關。要求至少兩位數字
+# 接在單一大寫字母後面，是為了跟一般文字中偶然出現的「A1」「B2」
+# 這類短代稱（樓層、選項編號等）做區隔，降低誤判機率。
+_MODEL_CODE_RE = re.compile(
+    r"(?<![A-Za-z])(?:[A-Z]{2,}[A-Z0-9]*|[A-Z]\d{2,})(?![a-z])"
+)
 
 
 def _is_car_related_question(text: str) -> bool:
@@ -281,34 +294,87 @@ async def _resolve_mention(
 
 _RECENT_CONVERSATION_WINDOW = "-10 minutes"
 
+# 使用者「連續嘗試發問、但一句都還沒成功通過關鍵字判斷」時給的寬限
+# 視窗，刻意比上面「已經成功問過一次」的視窗短很多——見
+# `_touch_recent_attempt` 的說明，這裡完全沒有「這確實是車輛相關」
+# 的任何實質證據（不像已經成功問過一次那樣，至少那句話本身通過了
+# 關鍵字判斷），拉長視窗只會提高「使用者純聊天離題，也被誤判成
+# 延續中」的風險，所以只給很短的緩衝時間讓使用者把話講清楚。
+_RECENT_ATTEMPT_WINDOW = "-2 minutes"
+
 
 async def _has_recent_conversation(channel_id: str, line_user_id: str | None) -> bool:
-    """檢查這個 LINE 使用者在這個 channel 是否剛剛才跟機器人聊過車輛
-    相關的問題（有進行中的 NotebookLM 對話串，且最近一次互動在
-    `_RECENT_CONVERSATION_WINDOW` 之內）。
+    """檢查這個 LINE 使用者在這個 channel 是否剛剛才跟機器人互動過，
+    符合下面兩種情況之一：
+
+    - 有進行中的 NotebookLM 對話串（曾經成功問過車輛相關問題），且
+      最近一次互動在 `_RECENT_CONVERSATION_WINDOW`（10 分鐘）之內。
+    - 還沒有任何一句話成功通過關鍵字判斷，但剛剛才嘗試發問過
+      （見 `_touch_recent_attempt`），且在更短的
+      `_RECENT_ATTEMPT_WINDOW`（2 分鐘）之內。
 
     給 1:1 聊天的車輛相關性把關（見下方 `_is_car_related_question`
     的呼叫處）用：如果對方現在仍在同一輪對話裡，單看這一則訊息本身
-    的關鍵字並不夠——追問句常常不會重複任何車輛相關字詞（真實發生
-    過的案例：機器人一次回覆了好幾家廠商的比較表，使用者追問
-    「其他5家呢？」，卻被當成跟車輛無關的問題直接打槍，因為
-    「其他」「5家」都不在關鍵字清單裡）。這種情況下不該重新套用
-    嚴格的關鍵字判斷。
+    的關鍵字並不夠——追問句常常不會重複任何車輛相關字詞。這涵蓋兩種
+    真實發生過的案例：
 
-    刻意限制在最近一段時間內，而不是「只要曾經聊過就一路放行」——
-    否則使用者幾天前問過車、之後隨口問一句完全無關的天氣，也會被
-    誤判成延續話題、直接送進 NotebookLM，重新暴露這道關卡原本要擋
-    的網路搜尋亂碼風險（見 `_A2UI_JSON_RE` 的說明）。"""
+    1. 機器人一次回覆了好幾家廠商的比較表，使用者追問「其他5家呢？」，
+       卻被當成跟車輛無關的問題直接打槍，因為「其他」「5家」都不在
+       關鍵字清單裡（`conversation_id` 已存在的情況）。
+    2. 使用者連續打了好幾句話在嘗試講清楚自己要問什麼（例如「阿迪斯」
+       →「尋 2022年阿迪斯 白色」→「A90」→「A190」，前後不到一分鐘），
+       但第一句字面上就沒有踩中任何關鍵字，導致連 `conversation_id`
+       都還沒建立——如果沒有 `_RECENT_ATTEMPT_WINDOW` 這條路徑，第一句
+       判斷失敗之後，接下來每一句追問都要重新從頭通過同一道嚴格關鍵字
+       檢查，等於連環誤判到底，即使關鍵字清單補得再齊也擋不住使用者
+       打字本來就模糊的情況。
+
+    第 1 種情況刻意用比較長的視窗，是因為至少有一句話真的通過了車輛
+    相關性判斷，比較不用擔心對方其實在聊完全無關的話題；第 2 種完全
+    沒有這個保證，所以視窗短很多——否則使用者幾天前問過車、之後隨口
+    問一句完全無關的天氣，也會被誤判成延續話題、直接送進
+    NotebookLM，重新暴露這道關卡原本要擋的網路搜尋亂碼風險（見
+    `_A2UI_JSON_RE` 的說明）。"""
     if not line_user_id:
         return False
     async with aiosqlite.connect(DB) as db:
         cur = await db.execute(
             "SELECT 1 FROM user_conversations WHERE channel_id=? AND line_user_id=? "
-            "AND updated_at >= datetime('now', ?)",
-            (channel_id, line_user_id, _RECENT_CONVERSATION_WINDOW),
+            "AND ("
+            "  (conversation_id IS NOT NULL AND updated_at >= datetime('now', ?))"
+            "  OR (conversation_id IS NULL AND updated_at >= datetime('now', ?))"
+            ")",
+            (channel_id, line_user_id, _RECENT_CONVERSATION_WINDOW, _RECENT_ATTEMPT_WINDOW),
         )
         row = await cur.fetchone()
     return row is not None
+
+
+async def _touch_recent_attempt(channel_id: str, line_user_id: str | None) -> None:
+    """記錄這個使用者剛剛在這個 channel 嘗試發問過一次——即使這次的
+    訊息沒有通過車輛相關性判斷、被回覆罐頭的離題訊息（`_OFF_TOPIC_REPLY`），
+    也要留下這個時間戳記，讓緊接著的下一句追問能在 `_RECENT_ATTEMPT_WINDOW`
+    內透過 `_has_recent_conversation` 獲得比較寬鬆的判斷，而不是每一句
+    都要重新從頭通過同一道嚴格關鍵字檢查（見該函式案例 2 的說明）。
+
+    刻意用 `ON CONFLICT ... DO UPDATE SET updated_at=...`（只更新
+    `updated_at`，不動 `conversation_id`）而不是整列覆寫——如果這個
+    使用者先前其實已經成功問過車、`conversation_id` 欄位原本就有值，
+    不該被這次「單純記錄嘗試過」的動作意外清空，那個值還要留給
+    NotebookLM 用來延續對話上下文（見 `nlm_service._save_conversation_id`）。"""
+    if not line_user_id:
+        return
+    async with aiosqlite.connect(DB) as db:
+        await db.execute(
+            """
+            INSERT INTO user_conversations (channel_id, line_user_id, conversation_id, updated_at)
+            VALUES (?, ?, NULL, CURRENT_TIMESTAMP)
+            ON CONFLICT(channel_id, line_user_id)
+            DO UPDATE SET updated_at=CURRENT_TIMESTAMP
+            """,
+            (channel_id, line_user_id),
+        )
+        await db.commit()
 
 
 async def _show_working_indicator(source_type: str, target_id: str, access_token: str, message: str) -> None:
@@ -522,6 +588,12 @@ async def _handle_message_event(channel_id: str, access_token: str, event: dict)
             and not _is_car_related_question(question)
             and not await _has_recent_conversation(channel_id, sender_user_id)
         ):
+            # 這句話本身沒有踩中任何關鍵字，但還是要記錄「剛剛嘗試發問
+            # 過」——讓使用者接下來幾句字面上再模糊的追問，能在
+            # `_RECENT_ATTEMPT_WINDOW` 內透過 `_has_recent_conversation`
+            # 得到寬限，不會被同一道關鍵字檢查連環打槍到底（見該函式
+            # 案例 2 的說明）。
+            await _touch_recent_attempt(channel_id, sender_user_id)
             await reply_text(
                 reply_token, access_token, _OFF_TOPIC_REPLY,
                 mention_user_id, mention_display_name,

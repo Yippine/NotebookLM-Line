@@ -343,3 +343,67 @@ def test_vendor_messages_without_date_filename_sort_after_dated_vendors():
 
     vendor_order = [m.split("】")[0].lstrip("【") for m in messages]
     assert vendor_order == ["BMW", "McLaren", "Audi"]
+
+
+def test_repeated_vehicle_block_with_same_label_is_deduped():
+    """重現實際發生過的真實案例：同一台車的規格被模型整段重新生成
+    了第二次，即使人設 prompt 已經明確要求「同一台車只能列一次」——
+    兩次生成的「【標籤】」逐字相同（「GOLF 淺灰版」），但後面欄位的
+    用字、單位不完全一樣（「排氣量：999」vs「排氣量：999cc」、
+    「未記載」vs「無特別記載」）。程式碼側要能擋下這種重複，只保留
+    第一次出現的區塊。"""
+    answer = (
+        "【GOLF 淺灰版】\n"
+        "廠牌：V.W [1]\n"
+        "車型：GOLF\n"
+        "年份：2023 年\n"
+        "顏色：淺灰\n"
+        "排氣量：999\n"
+        "建議售價：未記載\n"
+        "\n"
+        "【GOLF 淺灰版】\n"
+        "廠牌：V.W [1]\n"
+        "車型：GOLF\n"
+        "年份：2023 年\n"
+        "顏色：淺灰\n"
+        "排氣量：999cc\n"
+        "建議售價：無特別記載"
+    )
+    source_map = {1: "萬奇國際與奇汽車_20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.count("【GOLF 淺灰版】") == 1
+    # 保留的是第一次出現的版本，第二次（不同單位/用字）的內容不該
+    # 殘留在結果裡。
+    assert "999cc" not in message
+    assert "無特別記載" not in message
+
+
+def test_vehicle_blocks_with_distinct_car_disambiguation_suffix_are_not_deduped():
+    """同一家廠商底下真的有兩台同色同型號的車時，模型會自己在標籤
+    加註「(第一台)」「(第二台)」區分——這種情況下標籤本身不完全
+    相同，不該被誤判成重複而被去重掉。"""
+    answer = (
+        "【GOLF 藍色版 (第一台)】\n"
+        "廠牌：V.W [1]\n"
+        "車型：GOLF\n"
+        "里程數：5 萬公里\n"
+        "\n"
+        "【GOLF 藍色版 (第二台)】\n"
+        "廠牌：V.W [1]\n"
+        "車型：GOLF\n"
+        "里程數：8 萬公里"
+    )
+    source_map = {1: "萬奇國際與奇汽車_20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert "【GOLF 藍色版 (第一台)】" in message
+    assert "【GOLF 藍色版 (第二台)】" in message
+    assert "5 萬公里" in message
+    assert "8 萬公里" in message
