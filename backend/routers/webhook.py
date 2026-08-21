@@ -647,16 +647,16 @@ async def _ask_and_reply(
     訊息額度是「每月」總量管制，額度用盡時不管一次呼叫幾家、合併
     成幾則，一樣會被 429 擋下（這也是真實發生過的情況：某個月額度
     用完後，push 補送連續兩次都失敗，使用者完全沒收到第 5 家以後
-    的任何資訊）。所以改成前 4 家維持各自一則完整資訊，第 5 家開始
-    的其餘廠商全部併入第 5 則訊息——內容還是各家完整的「符合條件
-    的台數／最低建議售價」，不是只列名字的精簡提示，讓總則數固定
-    在 5 則以內、全部都用不計額度的 reply 送出，不管當月 push
-    額度剩多少都不受影響。
+    的任何資訊）。所以改成前 5 家維持各自一則完整資訊（正常的
+    「符合條件的台數／最低建議售價」格式），第 6 家開始的其餘廠商
+    不再各自成則，而是把名字列表（不含台數/售價）附加在第 5 則
+    訊息的最後面，讓總則數固定在 5 則以內、全部都用不計額度的
+    reply 送出，不管當月 push 額度剩多少都不受影響。
 
-    這個合併判斷只在「所有超過第 4 則的訊息都是單一廠商的分則
+    這個附加判斷只在「所有超過第 5 則的訊息都是單一廠商的分則
     結果」（開頭是「【廠商名稱】」，見 `_vendor_name_from_bubble`）
     時才套用；如果超過的內容不是逐廠商分則（例如很長的單一段落
-    被依長度切成好幾則），沒辦法這樣合併，仍退回原本的「前 5 則
+    被依長度切成好幾則），沒辦法這樣摘要，仍退回原本的「前 5 則
     reply、其餘合併成一則 push 補送」做法。"""
     target_id = group_id or room_id or sender_user_id
 
@@ -688,14 +688,16 @@ async def _ask_and_reply(
     if len(messages) <= 5:
         reply_messages = messages
     else:
-        overflow_vendors = [_vendor_name_from_bubble(m) for m in messages[4:]]
+        overflow_vendors = [_vendor_name_from_bubble(m) for m in messages[5:]]
         if all(overflow_vendors):
-            # 全部都是逐廠商分則的結果，可以安全併成一則、保留完整
-            # 內容，塞進第 5 則、跟前 4 則一起用免額度的 reply 送出
+            # 全部都是逐廠商分則的結果，前 5 家維持各自一則完整
+            # 資訊，第 6 家開始只把名字列表附加在第 5 則的最後面
+            # ——仍然只用 5 則、跟前 4 則一起用免額度的 reply 送出
             # ——見上方 docstring 的說明。
             reply_messages = messages[:4] + [
-                f"除此之外，還有 {len(overflow_vendors)} 家符合條件的廠商：\n\n"
-                + "\n\n".join(messages[4:])
+                messages[4]
+                + f"\n\n除此之外，還有 {len(overflow_vendors)} 家符合條件的廠商：\n"
+                + "、".join(overflow_vendors)
             ]
         else:
             # 超過的內容不是逐廠商分則，沒辦法摘要成一句話——退回

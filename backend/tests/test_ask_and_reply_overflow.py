@@ -34,15 +34,15 @@ def test_five_or_fewer_messages_all_go_through_reply_only(monkeypatch):
     assert pushed == []
 
 
-def test_more_than_five_vendor_bubbles_are_merged_into_a_fifth_reply_message(monkeypatch):
+def test_more_than_five_vendor_bubbles_keep_first_five_and_append_names_to_the_fifth(monkeypatch):
     """重現實際會發生的真實案例：8 家廠商各自一則，超過 LINE reply
     一次 5 則的上限。過去的做法是把第 5 家之後的內容合併成一則 push
     補送，但 push 訊息額度是「每月」總量管制，額度用完時不管合併成
     幾次呼叫都一樣會被拒絕，使用者完全收不到第 5 家以後的資訊
-    （真實發生過的案例）。所以現在改成前 4 家維持各自一則完整資訊，
-    第 5 家開始的其餘廠商全部併入第 5 則訊息——保留完整的台數／
-    售價內容，不是只列名字的精簡提示——總則數固定在 5 則以內、
-    全部都用不計額度的 reply 送出，完全不需要用到 push。"""
+    （真實發生過的案例）。所以現在改成前 5 家維持各自一則完整資訊，
+    第 6 家開始的其餘廠商不再各自成則，只把名字列表附加在第 5 則
+    訊息的最後面——總則數固定在 5 則以內、全部都用不計額度的
+    reply 送出，完全不需要用到 push。"""
     replied = []
     pushed = []
 
@@ -67,12 +67,11 @@ def test_more_than_five_vendor_bubbles_are_merged_into_a_fifth_reply_message(mon
     assert len(replied) == 1
     assert len(replied[0]) == 5
     assert replied[0][:4] == ["【廠商1】\n\n內容", "【廠商2】\n\n內容", "【廠商3】\n\n內容", "【廠商4】\n\n內容"]
-    merged = replied[0][4]
-    assert "4 家" in merged
-    # 併入的內容是完整的原始廠商訊息（含「內容」那行），不是只列名字。
-    assert merged.endswith(
-        "【廠商5】\n\n內容\n\n【廠商6】\n\n內容\n\n【廠商7】\n\n內容\n\n【廠商8】\n\n內容"
-    )
+    fifth = replied[0][4]
+    assert "3 家" in fifth
+    # 第 5 家自己的完整內容保留在前面，之後才是附加的名字列表。
+    assert fifth.startswith("【廠商5】\n\n內容")
+    assert fifth.endswith("廠商6、廠商7、廠商8")
 
     assert pushed == []  # 完全不需要用到 push
 
