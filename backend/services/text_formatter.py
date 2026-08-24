@@ -485,6 +485,49 @@ def _redundant_vendor_prefix_re(vendor: str) -> re.Pattern:
     return pattern
 
 
+_BARE_VENDOR_LABEL_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _bare_vendor_label_re(vendor: str) -> re.Pattern:
+    """比對「整個段落扣掉頭尾空白之後，逐字就只有這家廠商自己的
+    『【廠商】』標籤，沒有其他任何文字」的正規表示式——跟
+    `_redundant_vendor_prefix_re` 用同一套「【】／全形括號／引用
+    編號」寫法，差別是這個只鎖定「整段」，不管它出現在 `rendered`
+    的哪個位置。
+
+    真實發生過的案例：模型列完某家廠商一台車的完整規格明細之後，
+    緊接著又額外單獨印一次「【廠商】」當作這一段的結尾（例如列完
+    「【?VIOS】」的規格明細，下面又空一行印出「【弘益汽車】」），
+    跟外層 `_build_vendor_message` 加上去的「【廠商】」標題重複。
+    `_redundant_vendor_prefix_re` 只處理『整段內容一開頭』就是這個
+    標籤的情況（`_build_vendor_message` 呼叫時還會限制只拿掉一次），
+    抓不到列在中間或結尾、前面已經有其他段落的這種重複；由於任何
+    「整段只有廠商名稱標籤、沒有其他內容」的段落本身就不帶任何
+    資訊（外層標題已經顯示過一次），不論它出現在哪個位置都該整段
+    捨棄，所以另外用逐段（以空行分隔）比對取代只比對開頭。"""
+    pattern = _BARE_VENDOR_LABEL_RE_CACHE.get(vendor)
+    if pattern is None:
+        escaped = re.escape(vendor)
+        citation = r"(?:\s*\[[\d,\s\-]+\])?"
+        pattern = re.compile(
+            rf"^【\s*[（(]?\s*{escaped}{citation}\s*[）)]?\s*{citation}】$"
+        )
+        _BARE_VENDOR_LABEL_RE_CACHE[vendor] = pattern
+    return pattern
+
+
+def _strip_bare_vendor_label_paragraphs(text: str, vendor: str) -> str:
+    """套用 `_bare_vendor_label_re`：逐段掃過 `text`，只要某一段扣掉
+    頭尾空白之後完全符合這家廠商自己的『【廠商】』標籤，就整段拿掉
+    （見該函式說明）。真正有內容的車輛規格區塊一定是「【標籤】」
+    後面緊接著欄位明細、兩者同屬一段（人設 prompt 規定欄位緊接在
+    標籤下一行，中間不留空行），不會被誤判成「整段只有標籤」。"""
+    pattern = _bare_vendor_label_re(vendor)
+    blocks = text.split("\n\n")
+    kept = [block for block in blocks if not pattern.match(block.strip())]
+    return "\n\n".join(kept)
+
+
 _REDUNDANT_VENDOR_VALUE_LINE_RE_CACHE: dict[str, re.Pattern] = {}
 
 
@@ -804,6 +847,12 @@ def _split_by_vendor(
         # 算進去，不能只比對不含引用編號的字面全等。
         redundant_prefix_re = _redundant_vendor_prefix_re(vendor)
         rendered = redundant_prefix_re.sub("", rendered, count=1)
+
+        # 上面那行只處理「整段內容一開頭」的重複；模型有時候會在列完
+        # 一台車的規格明細之後，又在中間或結尾額外單獨重複一次同一個
+        # 「【廠商】」標籤（見 `_strip_bare_vendor_label_paragraphs`
+        # 的說明），這裡補上不限位置的版本。
+        rendered = _strip_bare_vendor_label_paragraphs(rendered, vendor)
 
         # 另一種真實發生過的重複：模型自己在比較表裡多加了一列
         # 「車商名稱」／「提供廠商」來標示每台車屬於哪個廠商，轉置成

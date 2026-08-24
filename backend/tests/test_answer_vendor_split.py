@@ -618,3 +618,55 @@ def test_price_without_other_disambiguation_text_collapses_empty_parens():
     assert len(messages) == 1
     assert "()" not in messages[0]
     assert "萬" not in messages[0].split("\n")[0]
+
+
+def test_trailing_bare_vendor_label_paragraph_is_dropped():
+    """重現實際發生過的真實案例：模型列完一台車的完整規格明細之後，
+    又在結尾額外單獨重複印一次同一個「【廠商】」標籤（不帶任何其他
+    文字、也沒有引用編號），跟 `_build_vendor_message` 加在外層的
+    「【廠商】」標題重複。既有的 `_redundant_vendor_prefix_re` 只處理
+    『整段內容一開頭』就是這個標籤的情況，抓不到列在車輛規格之後、
+    結尾額外多印的這種重複——這裡驗證整段只有廠商標籤、沒有其他
+    內容的段落，不論出現在哪個位置都該被拿掉。"""
+    answer = (
+        "【?VIOS】\n"
+        "廠牌：TOYOTA [1]\n"
+        "車型：?VIOS\n"
+        "年份：2017 年\n"
+        "\n"
+        "【弘益汽車】"
+    )
+    source_map = {1: "弘益汽車20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 1
+    message = messages[0]
+    assert message.count("【弘益汽車】") == 1
+    assert message.startswith("【弘益汽車】")
+    assert "【?VIOS】" in message
+
+
+def test_trailing_bare_vendor_label_paragraph_dropped_per_vendor_in_multi_vendor_answer():
+    """兩家廠商各自都在自己的區塊結尾多印了一次重複的廠商標籤時，
+    要分別在各自的訊息裡被拿掉，不影響對方。"""
+    answer = (
+        "【?VIOS】\n"
+        "廠牌：TOYOTA [1]\n"
+        "年份：2017 年\n"
+        "\n"
+        "【弘益汽車】\n\n"
+        "【VIOS】\n"
+        "廠牌：TOYOTA [2]\n"
+        "年份：2023 年\n"
+        "\n"
+        "【永春中古汽車有限公司】"
+    )
+    source_map = {1: "弘益汽車20260101.md", 2: "永春中古汽車有限公司20260101.md"}
+
+    messages = build_answer_messages(answer, source_map)
+
+    assert len(messages) == 2
+    hongyi_msg, yongchun_msg = messages
+    assert hongyi_msg.count("【弘益汽車】") == 1
+    assert yongchun_msg.count("【永春中古汽車有限公司】") == 1
